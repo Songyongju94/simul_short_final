@@ -1,0 +1,424 @@
+import time
+import numpy
+import traceback
+
+from binance_f import RequestClient
+from binance_f.model import *
+from binance_f.constant.test import *
+from binance_f.base.printobject import *
+from datetime import date, timedelta
+from kowanasutil import Log, Config
+
+from model.Currency import Currency
+
+from trading.TradingCenter import TradingCenter
+from trading.CandleAdapter import CandleAdapter
+from Definition import Definition
+
+# Bianace returned wrong pricePrecision values so menually update the price
+def updatePricePrecision(currSymbol, currPricePrecision):
+    pricePrecision = currPricePrecision
+
+    if currSymbol == 'GAIBUSDT':
+        pricePrecision = -1
+
+    return pricePrecision
+
+# Bianace returned wrong pricePrecision values so menually update the price
+def updatePricePrecision_backup(currSymbol, currPricePrecision):
+    symbol = currSymbol.replace('USDT', '')
+    pricePrecision = currPricePrecision
+
+    if symbol == 'YFI':
+        pricePrecision = 0
+    elif symbol == 'BTC' or symbol == 'MKR' or symbol == 'DEFI' or symbol == 'BTCDOM':
+        pricePrecision = 1
+    elif symbol == 'ETH' or symbol == 'BCH' or symbol == 'LTC' or symbol == 'XMR' or symbol == 'DASH' \
+            or symbol == 'ZEC' or symbol == 'BNB' or symbol == 'COMP'  or symbol == 'SOL' \
+            or symbol == 'AAVE' \
+            or symbol == 'QNT' or symbol == 'BSV' \
+            or symbol == 'PAXG' \
+            or symbol == 'METIS' or symbol == 'TAO':
+        pricePrecision = 2
+    elif symbol == 'ETC' or symbol == 'LINK' or symbol == 'XTZ' or symbol == 'ATOM' \
+            or symbol == 'EGLD' or symbol == 'TRB' or symbol == 'NEO' or symbol == 'QTUM' or symbol == 'SNX' \
+            or symbol == 'GMX' or symbol == 'KSM' or symbol == 'DOT' or symbol == 'CRV' or symbol == 'RUNE' \
+            or symbol == 'UNI' or symbol == 'AVAX' or symbol == 'NEAR' or symbol == 'FIL' \
+            or symbol == 'AXS' or symbol == 'ZEN' or symbol == 'ALICE' \
+            or symbol == 'GTC' or symbol == 'DYDX' or symbol == 'CELO' or symbol == 'AR' \
+            or symbol == 'LPT' or symbol == 'ENS' or symbol == 'FLOW' \
+            or symbol == 'INJ' or symbol == 'CVX' or symbol == 'ICP' \
+            or symbol == 'IP' or symbol == 'XVS' \
+            or symbol == 'UMA' or symbol == 'CYBER' or symbol == 'GAS'\
+            or symbol == 'ORDI' or symbol == 'MOVR' \
+            or symbol == 'RENDER' or symbol == 'BANANA' or symbol == 'RPL' or symbol == 'SANTOS' \
+            or symbol == 'OMNI' or symbol == 'NMR' or symbol == 'SSV' or symbol == 'AKT' \
+            or symbol == 'DEXE' or symbol == 'PROM' or symbol == 'VVV'  or symbol == 'BERA'   or symbol == 'FORTH' \
+            or symbol == 'ILV' or symbol == 'VANA' or symbol == 'ORCA' \
+            or symbol == 'HYPE' \
+            or symbol == 'TRADOOR' or symbol == 'ENSO' \
+            or symbol == 'AUCTION' or symbol == 'MLN':
+        pricePrecision = 3
+    elif symbol == 'XRP' or symbol == 'ADA' or symbol == 'ONT' or symbol == 'IOTA' or symbol == 'BAT' \
+            or symbol == 'ETHW' or symbol == 'HIGH' or symbol == 'THETA' or symbol == 'ALGO' or symbol == 'KNC' \
+            or symbol == 'DYM' or symbol == 'ZRX' or symbol == 'SXP' or symbol == 'KAVA' or symbol == 'BAND' \
+            or symbol == 'RLC' or symbol == 'SUSHI' or symbol == 'ICX' \
+            or symbol == 'STORJ' or symbol == 'FLM' \
+            or symbol == 'BEL' or symbol == 'CTK' \
+            or symbol == '1INCH' or symbol == 'SFP' or symbol == 'CHR' \
+            or symbol == 'MANA' or symbol == 'MTL' or symbol == 'OGN' or symbol == 'BAKE' \
+            or symbol == 'C98' or symbol == 'ATA' or symbol == 'CTSI' or symbol == 'IMX' \
+            or symbol == 'OP' or symbol == 'STG' \
+            or symbol == 'LUNA2' or symbol == 'LDO' or symbol == 'FET' or symbol == 'MAGIC' \
+            or symbol == 'MINA' or symbol == 'PHB' or symbol == 'STX' \
+            or symbol == 'PERP' or symbol == 'LQTY' or symbol == 'ARB' \
+            or symbol == 'EDU' \
+            or symbol == 'SUI' or symbol == 'WLD' or symbol == 'PENDLE' \
+            or symbol == 'ARKM' or symbol == 'AGLD' or symbol == 'YGG' or symbol == 'SEI' \
+            or symbol == 'HIFI' or symbol == 'ARK' or symbol == 'BICO' \
+            or symbol == 'POWR' \
+            or symbol == 'TIA' or symbol == 'CAKE' or symbol == 'TWT' or symbol == 'NTRN' \
+            or symbol == 'SUPER' or symbol == 'JTO' \
+            or symbol == 'ACE' or symbol == 'WIF' or symbol == 'MANTA' \
+            or symbol == 'ONDO' or symbol == 'LSK' or symbol == 'JUP' or symbol == 'ZETA' or symbol == 'RONIN' \
+            or symbol == 'STRK' \
+            or symbol == 'TON' or symbol == 'AXL' or symbol == 'SAGA' \
+            or symbol == 'SYN' or symbol == 'POPCAT' \
+            or symbol == 'FLUX' or symbol == 'UXLINK' or symbol == 'KDA' \
+            or symbol == 'CATI' or symbol == 'GHST' or symbol == 'EIGEN' \
+            or symbol == 'DIA' or symbol == 'SCR' or symbol == 'SAFE' \
+            or symbol == 'COW' or symbol == 'GRASS' or symbol == 'DRIFT' or symbol == 'NXPC' \
+            or symbol == 'AEVO' or symbol == 'API3' or symbol == 'SCRT' \
+            or symbol == 'DEGO' or symbol == 'AVA' or symbol == 'SPX' or symbol == 'MOVE' \
+            or symbol == 'VIRTUAL' or symbol == 'RAYSOL' or symbol == 'ACX' or symbol == 'AERO' or symbol == 'KAIA' \
+            or symbol == 'HOOK' or symbol == 'APE' or symbol == 'MASK' or symbol == 'MORPHO' \
+            or symbol == 'ZRO' or symbol == 'LUMIA' or symbol == 'USUAL' or symbol == 'PLUME' \
+            or symbol == 'IO' or symbol == 'NIL' or symbol == 'PARTI' or symbol == 'MAVIA'  or symbol == 'PROMPT' \
+            or symbol == 'ME' or symbol == 'FXS' or symbol == 'KERNEL' or symbol == 'WCT' or symbol == 'INIT' \
+            or symbol == 'RED' or symbol == 'VIC' or symbol == 'KAITO' or symbol == 'SHELL' or symbol == 'HEI' \
+            or symbol == 'LAYER' or symbol == 'EPIC' or symbol == 'FORM' or symbol == 'WAL' or symbol == 'HYPER' \
+            or symbol == 'ENA' or symbol == 'APT' or symbol == 'PUNDIX' or symbol == 'B2' or symbol == 'ZKJ' \
+            or symbol == 'BNT' or symbol == 'TAIKO' or symbol == 'AIOT' or symbol == 'ASTER' \
+            or symbol == 'ICNT' or symbol == 'ERA' or symbol == 'TREE' or symbol == 'PROVE' \
+            or symbol == 'CARV' or symbol == 'WLFI' or symbol == 'OPEN' or symbol == 'BARD' \
+            or symbol == 'ETHFI' or symbol == 'LISTA':
+        pricePrecision = 4
+    elif symbol == 'TRX' or symbol == 'XLM' or symbol == 'ZIL' or symbol == 'DOGE' or symbol == 'TNSR' \
+            or symbol == 'ZK' or symbol == 'BB' or symbol == 'BIO' or symbol == 'MOCA' or symbol == 'SLERF' or symbol == 'BAN' \
+            or symbol == 'GOAT' or symbol == 'FIDA' or symbol == 'AERGO' or symbol == 'CHESS' or symbol == 'MBOX' \
+            or symbol == 'REZ' or symbol == 'W' or symbol == 'PORTAL' or symbol == 'GLM' \
+            or symbol == 'PYTH' or symbol == 'CFX' or symbol == 'SAND' or symbol == 'LRC' or symbol == 'ENJ' \
+            or symbol == 'SKL' or symbol == 'GRT' or symbol == 'CHZ' or symbol == 'ANKR' or symbol == 'RVN' \
+            or symbol == 'XAI' or symbol == 'COTI' or symbol == 'HBAR' or symbol == 'ONE' \
+            or symbol == 'CELR' or symbol == 'NKN' or symbol == 'IOTX' \
+            or symbol == '1000XEC' or symbol == 'GALA' or symbol == 'ARPA' or symbol == 'PEOPLE' or symbol == 'ROSE' \
+            or symbol == 'DUSK' or symbol == 'WOO' or symbol == '1000LUNC' or symbol == 'T' \
+            or symbol == 'TRU' or symbol == 'BANK' or symbol == 'DOLO' \
+            or symbol == '1000FLOKI' or symbol == 'OXT' \
+            or symbol == 'WAXP' or symbol == 'RIF' or symbol == 'TOKEN' \
+            or symbol == 'NFP' or symbol == 'KAS' or symbol == 'AI' or symbol == '1000RATS' \
+            or symbol == 'RARE' or symbol == 'G' or symbol == 'SYS' or symbol == 'BRETT' \
+            or symbol == 'QUICK' or symbol == 'NEIROETH' or symbol == 'POL' \
+            or symbol == 'POLYX' or symbol == 'FIO' or symbol == 'PONKE' \
+            or symbol == 'HFT' or symbol == 'CETUS' or symbol == 'SWELL' or symbol == 'ACT' \
+            or symbol == 'JOE' or symbol == 'ID' or symbol == 'GMT' or symbol == '1000X' \
+            or symbol == 'ALCH' or symbol == 'SWARMS'  or symbol == 'SOLV' \
+            or symbol == 'ONG' or symbol == 'ARC' or symbol == 'AVAAI' or symbol == 'ATH'  or symbol == 'XCN' \
+            or symbol == 'BIGTIME' or symbol == 'RDNT' or symbol == 'STO' or symbol == 'SIGN' \
+            or symbol == 'HIVE' or symbol == 'DF' or symbol == 'PHA' or symbol == 'CGPT' or symbol == 'KMNO' \
+            or symbol == 'MAV' or symbol == 'AIXBT' or symbol == 'VELODROME' or symbol == 'KOMA' \
+            or symbol == 'GPS' or symbol == 'ANIME' or symbol == 'BMT' \
+            or symbol == 'BID' or symbol == 'BR' or symbol == 'GUN' or symbol == 'BABY' or symbol == 'FHE' \
+            or symbol == 'DEEP' or symbol == 'SXT' or symbol == 'MILK' or symbol == 'SYRUP' or symbol == 'OBOL' \
+            or symbol == 'AWE' or symbol == 'PIXEL' or symbol == 'BLUR' or symbol == 'SKYAI' \
+            or symbol == 'MERL' or symbol == 'BDXN' or symbol == 'PUFFER' or symbol == 'PORT3' \
+            or symbol == 'OL' or symbol == 'SAHARA' or symbol == 'TANSSI' or symbol == 'CROSS' \
+            or symbol == 'AIN' or symbol == 'VELVET' or symbol == 'ZORA' or symbol == 'ZRC' \
+            or symbol == 'ESPORTS' or symbol == 'PLAY' or symbol == 'NAORIS' or symbol == 'TOWNS' \
+            or symbol == 'AIO' or symbol == 'SAPIEN' or symbol == 'BTR' or symbol == 'ARIA' or symbol == 'KEGN' \
+            or symbol == 'YB' or symbol == 'TAKE' or symbol == 'PTB' or symbol == 'UB' \
+            or symbol == 'STEEM' or symbol == 'ALT' or symbol == 'OM' or symbol == 'MYRO' or symbol == 'VANRY':
+        pricePrecision = 5
+    elif symbol == 'IOST' or symbol == 'RSR' or symbol == 'DENT' or symbol == 'HOT' \
+            or symbol == 'ASTR' or symbol == 'VET' or symbol == 'JASMY' or symbol == 'CKB' \
+            or symbol == 'ACH' or symbol == 'SLP' or symbol == 'TRUTH' \
+            or symbol == 'BEAMX' or symbol == '1000BONK' or symbol == 'BOME' \
+            or symbol == 'DODOX' or symbol == 'SUN' or symbol == 'HMSTR' or symbol == 'COS' \
+            or symbol == '1000CAT' or symbol == 'TLM' or symbol == 'USDC' or symbol == 'DEGEN' \
+            or symbol == 'USTC' or symbol == 'VTHO' or symbol == 'FUN' or symbol == 'JST' \
+            or symbol == 'B3' or symbol == 'EPT' or symbol == 'AGT' \
+            or symbol == 'HUMA' or symbol == 'XVG' \
+            or symbol == 'MEMEFI' or symbol == 'HAEDAL' or symbol == 'SOPH' \
+            or symbol == 'DMC' or symbol == 'A2Z' or symbol == 'DOOD' \
+            or symbol == 'NOT':
+        pricePrecision = 6
+    elif symbol == 'SPELL':
+        pricePrecision = 7
+    else:
+        pricePrecision = -1
+        if not(symbol.endswith('BUSD') or symbol.endswith('USDC') or symbol == 'SRM' or symbol == 'HNT'
+            or symbol == 'CVC' or symbol == 'BTS' or symbol == 'BTC_240628' or symbol == 'ETH_240628'
+            or symbol == 'BTCST' or symbol == 'SC' or symbol == 'RAY' or symbol == 'FTT' or symbol == 'COCOS'
+            or symbol == 'UNFI'
+            or symbol == 'BTC_241227' or symbol == 'ETH_241227' or symbol == 'BTC_250328' or symbol == 'ETH_250328'
+            or symbol == 'ETHBTC' or symbol == 'BTC_240329' or symbol == 'ETH_240329'):
+            Log().d(symbol, ' pricePrecision is not decided. currPricePrecision=', currPricePrecision)
+
+    return pricePrecision
+
+class TradingBinance(TradingCenter):
+    def __init__(self):
+        self.__definition = Definition()
+        self.__config = Config(file=self.__definition.getConfig1())
+        self.__log = Log()
+
+        self.__request_client = RequestClient(
+            api_key=self.__config.configs.get('API_KEY'), secret_key=self.__config.configs.get('SECRET_KEY'))
+        self.hedgeModeOn()
+        self.upDownLimit = self.__config.configs.get('UP_DOWN_LIMIT')
+
+    def __getInterval(self, min):
+        mins = {1: CandlestickInterval.MIN1,
+                3: CandlestickInterval.MIN3,
+                5: CandlestickInterval.MIN5,
+                15: CandlestickInterval.MIN15,
+                30: CandlestickInterval.MIN30,
+                60: CandlestickInterval.HOUR1,
+                240: CandlestickInterval.HOUR4,
+                1000: CandlestickInterval.WEEK1}
+        return mins[min]
+
+    def fetchCurrency(self):
+        symbols = None
+        try:
+            value = self.__request_client.get_exchange_information()
+            symbols = value.symbols
+        except Exception as e:
+            self.__log.d(e, ' ', traceback.format_exc())
+            return None
+
+        return [Currency({'symbol': symbol.symbol,
+                          'pricePrecision': updatePricePrecision(symbol.symbol, symbol.pricePrecision),
+                          'quantityPrecision': symbol.quantityPrecision + 2}) for symbol in symbols]
+
+    def __calcBolinger(self, data):
+        ma20 = numpy.mean(data)
+        std = numpy.std(data)
+        bolup = ma20 + std * 2
+        boldown = ma20 - std * 2
+        return (bolup, ma20, boldown)
+
+    def getCandlestickData(self, symbol, minuites, limitCnt, startTime):
+        values = None
+        try:
+            values = self.__request_client.get_candlestick_data(symbol=symbol, interval=self.__getInterval(minuites),
+                                                                startTime=startTime, endTime=None, limit=limitCnt)
+        except Exception as e:
+            self.__log.d(e)
+        return values
+
+    def hedgeModeOn(self):
+        try:
+            result = self.changePositionMode()
+        except Exception as e:
+            self.__log.d(e)
+
+    def changePositionMode(self):
+        try:
+            result = self.__request_client.change_position_mode(dualSidePosition=True)
+        except Exception as e:
+            self.__log.d(e)
+        return result
+
+    def change_initial_leverage(self, symbol, leverage):
+        result = self.__request_client.change_initial_leverage(symbol=symbol, leverage=leverage)
+        return result
+
+    def postOrder(self, data, orderType):
+        result = None
+        price = None
+        quantity = None
+        clientOrderId = None
+        stopPrice = None
+        side = data[2]
+
+        if side == 'BUY':
+            longShort = PositionSide.LONG
+        else:
+            longShort = PositionSide.SHORT
+
+        if data[1].quantityPrecision == 0:
+            quantity = int(data[4])
+        else:
+            quantity = data[4]
+        quantity = round(quantity, data[1].quantityPrecision)
+
+        if data[0] == 'open':
+            if data[1].pricePrecision == 0:
+                price = int(data[3])
+            else:
+                price = data[3]
+
+            self.__log.d('$$$ send ', data[0], ' order symbol=', data[1].symbol, ' side=', side, ' price=', price,
+                         ' quantity=', quantity, ' position=', longShort)
+            print('$$$ send ', data[0], ' order symbol=', data[1].symbol, ' side=', side, ' price=', price,
+                  ' quantity=', quantity, ' position=', longShort)
+            if quantity <= 0:
+                print('quantity is less then zero')
+
+            try:
+                result = self.__request_client.post_order(
+                    symbol=data[1].symbol, side=side, ordertype=OrderType.LIMIT, timeInForce=TimeInForce.GTC,
+                    price=str(price), quantity=str(quantity), positionSide=longShort)
+                self.__log.d('open order result = ', result)
+            except Exception as e:
+                self.__log.d(e)
+        else:
+            if side == 'BUY':
+                side = 'SELL'
+            else:
+                side = 'BUY'
+
+            try:
+                self.__log.d('$$$ send close order symbol=', data[1].symbol, ' side=', data[2], ' price=', data[3],
+                             ' quantity=', quantity, ' stopPrice=', data[5])
+                if orderType is None:
+                    orderType = OrderType.TAKE_PROFIT
+
+                if orderType == OrderType.LIMIT:
+                    result = self.__request_client.post_order(
+                        symbol=data[1].symbol, side=side, ordertype=orderType, timeInForce=TimeInForce.GTC,
+                        price=str(data[3]), quantity=str(quantity), closePosition=False, positionSide=longShort)
+                else:
+                    result = self.__request_client.post_order(
+                        symbol=data[1].symbol, side=side, ordertype=orderType, timeInForce=TimeInForce.GTC,
+                        stopPrice=str(data[5]), price=str(data[3]), quantity=str(quantity), closePosition=False,
+                        positionSide=longShort)
+                    self.__log.d('close order result = ', result)
+            except Exception as e:
+                self.__log.d(e)
+        return result
+
+    def getRecentTradesList(self, symbol, count):
+        self.__log.d('getRecentTradesList ', symbol)
+        try:
+            result = self.__request_client.get_recent_trades_list(symbol=symbol, limit=count)
+        except Exception as e:
+            self.__log.d('getRecentTradesList e=', e)
+            time.sleep(1)
+        return result
+
+    def getOpenOrders(self, symbol):
+        self.__log.d('getOpenOrders ', symbol)
+        result = None
+        try:
+            result = self.__request_client.get_open_orders(symbol=symbol)
+        except Exception as e:
+            self.__log.d(e)
+            time.sleep(5)
+        return result
+
+    def getOrder(self, symbol, orderId, clientId):
+        self.__log.d('getOpenOrders ', symbol)
+        result = self.__request_client.get_order(symbol=symbol, orderId=orderId, origClientOrderId=clientId)
+        return result
+
+    def cancelAllOrders(self, symbol):
+        self.__log.d('cancelAllOrders ', symbol)
+        result = self.__request_client.cancel_all_orders(symbol=symbol)
+        return result
+
+    def changeMarginType(self, symbol):
+        self.__log.d('changeMarginType ', symbol)
+        result = self.__request_client.change_margin_type(symbol=symbol, marginType=FuturesMarginType.CROSSED)
+        return result
+
+    def getAccountTrades(self, symbol, limitCnt):
+        self.__log.d('changeMarginType ', symbol)
+        result = self.__request_client.get_account_trades(symbol=symbol, limit=limitCnt)
+        return result
+
+    def fetch1MinCandle(self, symbol, sTime, limit):
+        try:
+            result = self.__request_client.get_candlestick_data(symbol=symbol, interval=self.__getInterval(1),
+                                                                startTime=sTime, endTime=None, limit=limit)
+            return result
+        except Exception as e:
+            self.__log.d(e)
+            return None
+
+    def fetch3MinCandle(self, symbol, sTime, limit):
+        try:
+            result = self.__request_client.get_candlestick_data(symbol=symbol, interval=self.__getInterval(3),
+                                                                startTime=sTime, endTime=None, limit=limit)
+            return result
+        except Exception as e:
+            self.__log.d(e)
+            return None
+
+    def fetch5MinCandle(self, symbol, sTime, limit):
+        try:
+            result = self.__request_client.get_candlestick_data(symbol=symbol, interval=self.__getInterval(5),
+                                                                startTime=sTime, endTime=None, limit=limit)
+            return result
+        except Exception as e:
+            self.__log.d(e)
+            return None
+
+    def fetch15MinCandle(self, symbol, sTime, limit):
+        try:
+            result = self.__request_client.get_candlestick_data(symbol=symbol, interval=self.__getInterval(15),
+                                                                startTime=sTime, endTime=None, limit=limit)
+            return result
+        except Exception as e:
+            self.__log.d(e)
+            return None
+
+    def fetch30MinCandle(self, symbol, sTime, limit):
+        try:
+            result = self.__request_client.get_candlestick_data(symbol=symbol, interval=self.__getInterval(30),
+                                                                startTime=sTime, endTime=None, limit=limit)
+            return result
+        except Exception as e:
+            self.__log.d(e)
+            return None
+
+    def fetch60MinCandle(self, symbol, sTime, limit):
+        try:
+            result = self.__request_client.get_candlestick_data(symbol=symbol, interval=self.__getInterval(60),
+                                                                startTime=sTime, endTime=None, limit=limit)
+            return result
+        except Exception as e:
+            self.__log.d(e)
+            return None
+
+    def fetch4HourCandle(self, symbol, sTime, limit):
+        try:
+            result = self.__request_client.get_candlestick_data(symbol=symbol, interval=self.__getInterval(240),
+                                                                startTime=sTime, endTime=None, limit=limit)
+            return result
+        except Exception as e:
+            self.__log.d(e)
+            return None
+
+    @staticmethod
+    def validSymbol(symbol):
+        if symbol == 'BTCBUSD' or symbol == 'BTCUSDT':
+            return False
+        return True
+
+    def getFundingRate(self, symbol, sTime, eTime):
+        try:
+            result = self.__request_client.get_funding_rate(symbol=symbol, startTime=sTime, endTime=eTime, limit=None)
+            return result
+        except Exception as e:
+            self.__log.d(e)
+            return None
+
+    def getMarkPrice(self, symbol):
+        try:
+            result = self.__request_client.get_mark_price(symbol=symbol)
+            return result
+        except Exception as e:
+            self.__log.d(e)
+            return None
