@@ -22,6 +22,8 @@ class TradeInfo:
         self.addBuyCount = data['addBuyCount']
         self.addMBuyCount = data['addMBuyCount']
         self.buyMode = data['buyMode']
+        self.recentLow = data.get('recentLow', 0)
+        self.recentLowTime = data.get('recentLowTime', '')
 
     def __str__(self):
         return f"{datetime.fromtimestamp(self.candleTime/1000).strftime('%Y%m%d %H%M')}"

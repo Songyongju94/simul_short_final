@@ -368,99 +368,201 @@ class RepositoryTests(unittest.TestCase):
                 ("BuyPrice","double",""),("buyTime","bigint",""),
                 ("triggerTime","bigint",""),("triggerPrice","double",""),
                 ("buyMode","varchar(16)",""),("sellTime","bigint",""),
-                ("bolDataList","varchar(1000)",""),("buyTimeKST","varchar(19)","")]
+                ("bolDataList","varchar(1000)",""),("buyTimeKST","varchar(19)",""),("recentLow","double",""),("recentLowTime","varchar(19)","")]
         cursor=Mock(rowcount=1)
         cursor.fetchall.return_value=[dict(Field=n,Type=t,Extra=e) for n,t,e in fields]
         r=repo.RSICandleRepository(SimpleNamespace(cursor=cursor))
         signal,=s.evaluate(*fixture())
         signal["BuyPrice"]=80.2
+        signal.update(recentLow=79.5,recentLowTime=signal["buyTime"]-60)
         self.assertTrue(r.save_signal("TEST'COIN",signal,1))
         sql,params=cursor.execute.call_args.args
         self.assertNotIn("TEST'COIN",sql)
         data=dict(zip([n for n,t,e in fields if not e],params[:-3]))
         self.assertEqual(data["buyTimeKST"], "1970-01-21 14:15:00")
+        self.assertEqual(data["recentLow"],79.5)
+        self.assertEqual(data["recentLowTime"],"1970-01-21 14:14:00")
         self.assertEqual(data["sellTime"],0)
         self.assertEqual(data["bolDataList"],"")
 
+class IntraminuteTests(unittest.TestCase):
+    def seed(self, expires=60*M):
+        return dict(execution_mode=s.INTRAMINUTE_MODE,wait_minutes=60,time=-Q,
+                    close=100.,value=100/3,avg_gain=1.,avg_loss=2.,gains=[],losses=[],
+                    pending=dict(armed_at=0,expires_at=expires,lower=110.,upper=130.))
+
+    def bars(self, close=50.):
+        return [s.Bar(t,100.,max(100.,close),min(100.,close),close,0) for t in (0,5*M,10*M)]
+
+    def prices(self,left,right):
+        prices=[100.,99.,100.,101.]+[110.]*11
+        return [(t,prices[t//M],prices[t//M]-1) for t in range(left,right,M)]
+
+    def test_first_matching_minute_and_no_future_close_used(self):
+        results=[]
+        for close in (50.,200.):
+            state=self.seed()
+            result,=s.evaluate_intraminute(self.bars(close),0,Q,self.prices,rsi_state=state)
+            self.assertEqual(result["buyTime"],3*M//1000)
+            self.assertEqual(result["BuyPrice"],101.)
+            self.assertEqual(result["close"],101.)
+            self.assertEqual(result["previousRSI"],100/3)
+            self.assertAlmostEqual(result["rsi"],35.)
+            self.assertNotIn("pending",state)
+            results.append(result)
+        self.assertEqual(*results)
+
+    def test_low_uses_closed_minutes_not_buying_minutes_future_low(self):
+        def prices(left,right):
+            opens=[100.,99.,100.,101.]+[110.]*11
+            lows=[98.,95.,96.,1.]+[1.]*11
+            return [(t,opens[t//M],lows[t//M]) for t in range(left,right,M)]
+        result,=s.evaluate_intraminute(self.bars(),0,Q,prices,rsi_state=self.seed())
+        self.assertEqual(result["recentLow"],95.)
+        self.assertEqual(result["recentLowTime"],M//1000)
+        self.assertEqual(result["buyTime"],3*M//1000)
+
+    def test_low_survives_restart_and_old_pending_is_reconstructed(self):
+        def prices(left,right):
+            result=[]
+            for t in range(left,right,M):
+                price=101. if t>=Q+M else 100.
+                low=90. if t==5*M else price-1
+                result.append((t,price,low))
+            return result
+        state=self.seed()
+        self.assertEqual(list(s.evaluate_intraminute(self.bars(100.),0,Q,prices,rsi_state=state)),[])
+        self.assertEqual(state["pending"]["recent_low"],90.)
+        following=[s.Bar(t,100,102,99,100,0) for t in (Q,Q+5*M,Q+10*M)]
+        for legacy in (False,True):
+            restored=json.loads(json.dumps(state))
+            if legacy:
+                for key in ("recent_low","recent_low_time","low_tracked_until"):
+                    restored["pending"].pop(key,None)
+            result,=s.evaluate_intraminute(following,Q,2*Q,prices,rsi_state=restored)
+            self.assertEqual(result["recentLow"],90.)
+            self.assertEqual(result["recentLowTime"],5*M//1000)
+
+    def test_inclusive_expiry_and_no_refresh(self):
+        self.assertEqual(len(list(s.evaluate_intraminute(self.bars(),0,Q,self.prices,
+                                                       rsi_state=self.seed(3*M)))),1)
+        state=self.seed(2*M)
+        logs=[]
+        self.assertEqual(list(s.evaluate_intraminute(self.bars(),0,Q,self.prices,
+                                                  rsi_state=state,on_event=logs.append)),[])
+        self.assertNotIn("pending",state)
+        self.assertTrue(any("WAIT_EXPIRED" in log for log in logs))
+
+    def test_minute_api_validation(self):
+        fetch=Mock(return_value=[SimpleNamespace(openTime=t,open=100,low=99) for t in range(0,Q,M)])
+        self.assertEqual(len(s.minute_open_prices(fetch,"TEST",0,Q)),15)
+        fetch.assert_called_once_with(symbol="TEST",interval="1m",startTime=0,endTime=Q-1,limit=15)
+        fetch.return_value=[SimpleNamespace(openTime=0,open=100,low=99)]
+        with self.assertRaises(s.MinuteDataUnavailable): s.minute_open_prices(fetch,"TEST",0,Q)
+        fetch.return_value=[SimpleNamespace(openTime=0,open=float("nan"),low=99)]
+        with self.assertRaises(s.MinuteDataUnavailable): s.minute_open_prices(fetch,"TEST",0,M)
+
+    def test_old_checkpoint_rejected(self):
+        with self.assertRaises(ValueError): s.validate_intraminute_state({"time":0,"value":20})
+        s.validate_intraminute_state({})
+
+    def test_intraminute_cache_and_serialized_resume_equivalence(self):
+        bars,start,end=fixture()
+        mapping={b.time:b.open for b in bars}
+        def prices(left,right):
+            return [(t, price, price-.01) for t in range(left,right,M)
+                    for price in [80.2 if end-Q+M<=t<end else mapping[t//(5*M)*(5*M)]]]
+        expected=list(s.evaluate_intraminute(bars,start,end,prices))
+        self.assertEqual(len(expected),1)
+        cursor=0
+        state={}
+        actual=[]
+        cache=s.RSIHistoryCache()
+        for right in sorted(set([d*D for d in range(1,21)]+[end-Q,end])):
+            # Reload cache like a fresh process each time; only 20-day retained history.
+            history=[b for b in bars if max(0,cursor//D*D-20*D)<=b.time<right]
+            cache=s.RSIHistoryCache()
+            prepared=cache.prepare(history,cursor,right)
+            actual.extend(s.evaluate_intraminute(history,cursor,right,prices,
+                                                rsi_state=state,prepared=prepared))
+            state=json.loads(json.dumps(state))
+            cursor=right
+        self.assertEqual(actual,expected)
+
+
 class IntegrationTests(unittest.TestCase):
-    def test_on_demand_api_and_repeated_run(self):
-        tree=ast.parse((ROOT/"trading/TradingAgent.py").read_text(encoding="utf-8-sig"))
+    def test_intraminute_api_failure_save_failure_resume_and_cooldown(self):
+        tree=ast.parse((ROOT/"trading/TradingAgent.py").read_bytes())
         cls=next(n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=="TradingAgent")
         cls.body=[n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name in ("runBuyRSIBuyOperation","__rsiSourceWindows")]
         bars,start,end=fixture()
+        expected_time=(end-Q+M)//1000
         saved=[]
         checkpoints={}
-        failures={"checkpoint": False}
+        failures={"checkpoint":False,"api":False}
+        deleted=[]
         class FakeRepository:
             def __init__(self,c): pass
             def source_windows(self,i): return [("TEST",start,end)]
             def acquire_simulation_lock(self): pass
             def release_simulation_lock(self): pass
             def prepare_progress(self): pass
-            def delete_completed_source(self, symbol, end_time):
-                assert checkpoints[symbol][0] >= end_time
+            def load_progress(self,symbol): return json.loads(json.dumps(checkpoints.get(symbol)))
+            def prune_processed(self,*args): return 0
+            def delete_completed_source(self,symbol,right):
+                assert checkpoints[symbol][0]>=right
+                deleted.append(right)
                 return 0
-            def load_progress(self, symbol):
-                return json.loads(json.dumps(checkpoints.get(symbol)))
-            def prune_processed(self, symbol, next_time):
-                cutoff = next_time // D * D - 20*D
-                bars[:] = [b for b in bars if b.time >= cutoff]
-                return 0
-            def finish_chunk(self, symbol, next_time, state):
-                if failures["checkpoint"] and next_time > 20*D:
-                    failures["checkpoint"] = False
+            def finish_chunk(self,symbol,right,state):
+                if failures["checkpoint"] and right>20*D:
+                    failures["checkpoint"]=False
                     raise RuntimeError("stopped after buy commit")
-                checkpoints[symbol] = json.loads(json.dumps([next_time, state]))
-                return self.prune_processed(symbol, next_time)
-            def read_five_minutes(self,symbol,left,right):
-                return rows([b for b in bars if left <= b.time < right])
+                checkpoints[symbol]=json.loads(json.dumps([right,state]))
+                return 0
+            def read_five_minutes(self,symbol,left,right): return rows([b for b in bars if left<=b.time<right])
             def existing_buy_times(self,symbol): return {v["buyTime"] for v in saved}
             def save_signal(self,symbol,signal,index): saved.append(signal); return True
             def commit(self): pass
-        fetch=Mock(return_value=[SimpleNamespace(openTime=end,open=80.2)])
+        by_time={b.time:b for b in bars}
+        def response(**kwargs):
+            if failures["api"]: return []
+            result=[]
+            for t in range(kwargs["startTime"],kwargs["endTime"]+1,M):
+                price=80.2 if end-Q+M<=t<end else by_time[t//(5*M)*(5*M)].open
+                result.append(SimpleNamespace(openTime=t,open=price,low=price-.01))
+            return result
+        fetch=Mock(side_effect=response)
         factory=Mock(return_value=SimpleNamespace(get_candlestick_data=fetch))
         env={"time":SimpleNamespace(time=lambda:(end+M)/1000,sleep=lambda _:None)}
         exec(compile(ast.Module(body=[cls],type_ignores=[]),"isolated","exec"),env)
-        a=env["TradingAgent"]()
+        agent=env["TradingAgent"]()
         for key,value in dict(rsiDbConnection=None,candleInterval=5,specificIndexFrom=0,specificIndexTo=0,log=SimpleNamespace(d=lambda *a:None)).items():
-            setattr(a,"_TradingAgent__"+key,value)
+            setattr(agent,"_TradingAgent__"+key,value)
         modules={"model":SimpleNamespace(),"trading":SimpleNamespace(),
                  "model.RSICandleRepository":SimpleNamespace(RSICandleRepository=FakeRepository),
                  "trading.RSIBuyStrategy":s,
                  "trading.BinanceFuturesClient":SimpleNamespace(BinanceFuturesClient=factory)}
         with patch.dict(sys.modules,modules):
-            # A DB buy one hour earlier blocks entry before any network request.
-            saved.append({"buyTime": end//1000-3600})
-            self.assertEqual(a.runBuyRSIBuyOperation(target_symbol="TEST"), 0)
-            self.assertEqual(len(saved), 1)
-            factory.assert_not_called()
-            fetch.assert_not_called()
-            saved.clear()
-            checkpoints.clear()
-            fetch.return_value = []
-            self.assertEqual(a.runBuyRSIBuyOperation(target_symbol="TEST"), 0)
-            self.assertEqual(checkpoints["TEST"][0], 20*D)
-            self.assertEqual(saved, [])
-            fetch.reset_mock()
-            factory.reset_mock()
-            fetch.return_value = [SimpleNamespace(openTime=end, open=80.2)]
-            failures["checkpoint"] = True
-            with self.assertRaisesRegex(RuntimeError, "stopped after buy commit"):
-                a.runBuyRSIBuyOperation(target_symbol="TEST")
-            self.assertEqual(len(saved), 1)
-            self.assertEqual(checkpoints["TEST"][0], 20*D)
-            # Reuse the durable buy row, then advance the previously unfinished batch.
-            self.assertEqual(a.runBuyRSIBuyOperation(target_symbol="TEST"),0)
-            self.assertEqual(checkpoints["TEST"][0], end)
-            self.assertEqual(a.runBuyRSIBuyOperation(target_symbol="TEST"),0)
+            failures["api"]=True
+            with self.assertRaises(s.MinuteDataUnavailable): agent.runBuyRSIBuyOperation(target_symbol="TEST")
+            self.assertEqual(checkpoints["TEST"][0],20*D)
+            self.assertEqual(saved,[])
+            self.assertEqual(deleted,[])
+            failures.update(api=False,checkpoint=True)
+            with self.assertRaisesRegex(RuntimeError,"stopped after buy commit"):
+                agent.runBuyRSIBuyOperation(target_symbol="TEST")
+            self.assertEqual(len(saved),1)
+            self.assertEqual(saved[0]["buyTime"],expected_time)
             self.assertEqual(saved[0]["BuyPrice"],80.2)
-            fetch.assert_called_once()
-            factory.assert_called_once()
-            saved.clear()
+            self.assertEqual(checkpoints["TEST"][0],20*D)
+            self.assertEqual(agent.runBuyRSIBuyOperation(target_symbol="TEST"),0)
+            self.assertEqual(checkpoints["TEST"][0],end)
+            fetch.reset_mock()
+            self.assertEqual(agent.runBuyRSIBuyOperation(target_symbol="TEST"),0)
+            fetch.assert_not_called()
             checkpoints.clear()
-            bars[:]=[b for b in bars if b.time>=2*D]
-            factory.reset_mock()
-            self.assertEqual(a.runBuyRSIBuyOperation(target_symbol="TEST"),0)
-            factory.assert_not_called()
+            saved[:]=[{"buyTime":expected_time-3600}]
+            self.assertEqual(agent.runBuyRSIBuyOperation(target_symbol="TEST"),0)
+            self.assertEqual(len(saved),1)
 
 if __name__=="__main__": unittest.main()

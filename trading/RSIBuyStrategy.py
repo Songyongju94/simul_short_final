@@ -234,3 +234,147 @@ def entry_price(fetch, symbol, decision_time, as_of):
     if not isfinite(price) or price <= 0:
         raise ValueError("Invalid entry minute open")
     return price
+
+
+INTRAMINUTE_MODE = "intraminute_open_v1"
+
+
+class MinuteDataUnavailable(RuntimeError):
+    pass
+
+
+def validate_intraminute_state(state):
+    mode = state.get("execution_mode")
+    if mode not in (None, INTRAMINUTE_MODE) or (mode is None and ("time" in state or "pending" in state)):
+        raise ValueError("Old RSI checkpoint uses closed-15m entry timing. Restore source backup and use separate/reset RSI progress and results for the intraminute strategy.")
+
+
+def minute_open_prices(fetch, symbol, start, end):
+    """Exact minute opens in [start,end); never substitute absent minutes."""
+    rows = fetch(symbol=symbol, interval="1m", startTime=start,
+                 endTime=end-1, limit=(end-start)//MINUTE)
+    expected = list(range(start, end, MINUTE))
+    if rows is None or [row.openTime for row in rows] != expected:
+        raise MinuteDataUnavailable(f"Incomplete 1m opens for {symbol}: {format_kst(start/1000)}")
+    prices = [float(row.open) for row in rows]
+    if any(not isfinite(price) or price <= 0 for price in prices):
+        raise MinuteDataUnavailable(f"Invalid 1m open for {symbol}")
+    lows = [float(row.low) for row in rows]
+    if any(not isfinite(low) or low <= 0 or low > price for low, price in zip(lows, prices)):
+        raise MinuteDataUnavailable(f"Invalid 1m low for {symbol}")
+    return list(zip(expected, prices, lows))
+
+
+def track_pending_low(pending, price, candle_time):
+    # Strict comparison retains the FIRST minute when equal lows recur.
+    if pending.get("recent_low") is None or price < pending["recent_low"]:
+        pending["recent_low"] = price
+        pending["recent_low_time"] = candle_time
+
+
+def checked_minute_ticks(provider, start, end):
+    ticks = provider(start, end)
+    if [tick[0] for tick in ticks] != list(range(start, end, MINUTE)):
+        raise MinuteDataUnavailable("Incomplete minute-open sequence")
+    for t, price, low in ticks:
+        if not isfinite(price) or price <= 0 or not isfinite(low) or low <= 0 or low > price:
+            raise MinuteDataUnavailable("Invalid minute open/low")
+    return ticks
+
+
+def evaluate_intraminute(bars, start, end, minute_opens, rsi_state=None,
+                        wait_minutes=60, on_event=None, prepared=None):
+    """Arm on closed 15m data, confirm using each next minute's OPEN only."""
+    from copy import deepcopy
+    state = {} if rsi_state is None else rsi_state
+    validate_intraminute_state(state)
+    validate_wait_minutes(wait_minutes, state)
+    state.update(execution_mode=INTRAMINUTE_MODE, wait_minutes=wait_minutes)
+    if prepared is None:
+        source_times = {bar.time for bar in bars}
+        quarters = aggregate(bars, QUARTER, 5*MINUTE)
+        days = aggregate(bars, DAY, 5*MINUTE)
+    else:
+        source_times, quarters, days = prepared
+    window = deque(maxlen=20)
+    day_index = 0
+    for bar in quarters:
+        if rsi_state is not None and bar.time < start:
+            continue
+        close_time = bar.time + QUARTER
+        if close_time > end:
+            break
+        pending = state.get("pending")
+        had_pending = pending is not None
+        if pending is not None and bar.time >= start:
+            if state.get("time") != bar.time-QUARTER:
+                raise MinuteDataUnavailable("Missing closed 15m history during pending entry")
+            # Older intraminute checkpoints lack low history. Reconstruct only
+            # completed minutes since BUY_READY before evaluating the new quarter.
+            if "low_tracked_until" not in pending:
+                left = pending["armed_at"]
+                history_end = min(bar.time, pending["expires_at"])
+                while left < history_end:
+                    right = min(left + QUARTER, history_end)
+                    for t, price, minute_low in checked_minute_ticks(minute_opens, left, right):
+                        track_pending_low(pending, minute_low, t)
+                    left = right
+                pending["low_tracked_until"] = history_end
+            scan_end = min(close_time, pending["expires_at"] + MINUTE)
+            if bar.time < scan_end:
+                ticks = checked_minute_ticks(minute_opens, bar.time, scan_end)
+                opening = ticks[0][1]
+                high = low = opening
+                prior = state.get("value")
+                for tick_time, price, minute_low in ticks:
+                    if not isfinite(price) or price <= 0:
+                        raise MinuteDataUnavailable("Invalid minute open")
+                    high, low = max(high,price), min(low,price)
+                    track_pending_low(pending, price, tick_time)
+                    # Start each provisional update from the SAME closed-bar seed.
+                    provisional = Bar(bar.time,opening,high,low,price,0)
+                    temporary = deepcopy(state)
+                    current = wilder_rsi([provisional], state=temporary)[0]
+                    if prior is not None and current is not None and price > opening and current > prior:
+                        state.pop("pending",None)
+                        yield dict(candleTime=bar.time//1000,position="LONG",
+                                   high=high,low=low,close=price,BuyPrice=price,
+                                   bolHigh=pending["upper"],bolLow=pending["lower"],
+                                   buyTime=tick_time//1000,triggerTime=tick_time//1000,
+                                   triggerPrice=price,buyMode="RSI_BB_15M",
+                                   rsi=current,previousRSI=prior,
+                                   recentLow=pending["recent_low"],
+                                   recentLowTime=pending["recent_low_time"]//1000)
+                        break
+                    # This minute's low becomes known only AFTER its open-time
+                    # decision. Never include the buying minute's future low.
+                    if tick_time < pending["expires_at"]:
+                        track_pending_low(pending, minute_low, tick_time)
+                        pending["low_tracked_until"] = tick_time + MINUTE
+            if state.get("pending") is not None and close_time > pending["expires_at"]:
+                state.pop("pending",None)
+                had_pending = False
+                if on_event:
+                    on_event(f"WAIT_EXPIRED expiresAt={format_kst(pending['expires_at']/1000)} waitMinutes={wait_minutes} reason=no_bullish_RSI_rise; buy_cancelled")
+        # Only now is this quarter's closing price known.
+        current = wilder_rsi([bar],state=state)[0]
+        while day_index < len(days) and days[day_index].time+DAY <= close_time:
+            day = days[day_index]
+            if window and day.time-window[-1].time != DAY:
+                window.clear()
+            window.append(day)
+            day_index += 1
+        if bar.time < start or had_pending:
+            continue
+        if (close_time-5*MINUTE-20*DAY not in source_times or current is None
+                or len(window)<20 or window[-1].time+DAY != close_time//DAY*DAY):
+            continue
+        closes = [day.close for day in window]
+        mid, deviation = fmean(closes), pstdev(closes)
+        lower, upper = mid-2*deviation, mid+2*deviation
+        if lower>0 and bar.close<=lower*.97 and current<=30:
+            state["pending"] = dict(armed_at=close_time,expires_at=close_time+wait_minutes*MINUTE,
+                                    lower=lower,upper=upper,
+                                    recent_low=None,recent_low_time=None,low_tracked_until=close_time)
+            if on_event:
+                on_event(f"WAIT_STARTED armedAt={format_kst(close_time/1000)} close={bar.close} bolLow={lower} threshold={lower*.97} rsi={current} expiresAt={format_kst((close_time+wait_minutes*MINUTE)/1000)} waitMinutes={wait_minutes}")

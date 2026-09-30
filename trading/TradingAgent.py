@@ -3232,12 +3232,12 @@ class TradingAgent:
         return True
 
     # TEST 18: independent RSI / daily Bollinger buy simulation
-    def runBuyRSIBuyOperation(self, target_symbol="1000BONKUSDT", wait_minutes=60, index_from=None, index_to=None, cooldown_hours=2):
+    def runBuyRSIBuyOperation(self, target_symbol=None, wait_minutes=60, index_from=None, index_to=None, cooldown_hours=2):
         """TEST 18: resume daily batches, then prune only obsolete source candles."""
         from bisect import insort
         from math import isfinite
         from model.RSICandleRepository import RSICandleRepository
-        from trading.RSIBuyStrategy import DAY, MINUTE, QUARTER, evaluate, five_minute_bars, entry_price, validate_wait_minutes, cooldown_previous_buy, RSIHistoryCache, format_kst
+        from trading.RSIBuyStrategy import DAY, MINUTE, QUARTER, evaluate_intraminute, minute_open_prices, validate_intraminute_state, five_minute_bars, validate_wait_minutes, cooldown_previous_buy, RSIHistoryCache, format_kst
         from trading.BinanceFuturesClient import BinanceFuturesClient
 
         if self.__candleInterval != 5:
@@ -3253,11 +3253,12 @@ class TradingAgent:
             repository.prepare_progress()
             client = None
             as_of = int(time.time() * 1000)
-            saved = duplicates = missing = 0
+            saved = duplicates = 0
             source_windows = list(self.__rsiSourceWindows(repository, target_symbol, index_from, index_to))
             for index, (symbol, start, end) in source_windows:
                 progress = repository.load_progress(symbol)
                 cursor, rsi_state = progress if progress is not None else (start, {})
+                validate_intraminute_state(rsi_state)
                 validate_wait_minutes(wait_minutes, rsi_state)
                 if progress is not None:
                     # Also finish any cleanup interrupted after the checkpoint commit.
@@ -3273,6 +3274,14 @@ class TradingAgent:
                     continue
                 existing = repository.existing_buy_times(symbol)
                 buy_times = sorted(existing)
+                def fetch_minute_opens(left, right):
+                    nonlocal client
+                    if client is None:
+                        client = BinanceFuturesClient()
+                    prices = minute_open_prices(client.get_candlestick_data, symbol, left, right)
+                    time.sleep(0.25)
+                    return prices
+
                 symbol_saved = 0
                 history_cache = RSIHistoryCache()
                 read_from = min(start, cursor) if progress is None else cursor // DAY * DAY - 20 * DAY
@@ -3282,9 +3291,8 @@ class TradingAgent:
                         repository.read_five_minutes(symbol, read_from, chunk_end), as_of)
                     prepared = history_cache.prepare(bars, cursor, chunk_end)
                     read_from = chunk_end
-                    incomplete = False
-                    for signal in evaluate(
-                            bars, cursor, chunk_end, rsi_state=rsi_state, wait_minutes=wait_minutes,
+                    for signal in evaluate_intraminute(
+                            bars, cursor, chunk_end, minute_opens=fetch_minute_opens, rsi_state=rsi_state, wait_minutes=wait_minutes,
                             on_event=lambda message: self.__log.d(f"RSI {symbol} {message}"),
                             prepared=prepared):
                         if signal["buyTime"] in existing:
@@ -3297,18 +3305,7 @@ class TradingAgent:
                             self.__log.d(f"RSI {symbol} BUY_COOLDOWN_SKIPPED buyTime={candidate_at} "
                                          f"nextAllowedAt={allowed_at} cooldownHours={cooldown_hours}")
                             continue
-                        if client is None:
-                            client = BinanceFuturesClient()
-                        price = entry_price(client.get_candlestick_data, symbol,
-                                            signal["buyTime"] * 1000, as_of)
-                        time.sleep(0.25)
-                        if price is None:
-                            missing += 1
-                            self.__log.d("RSI paused: entry minute unavailable; retry on restart",
-                                         symbol, format_kst(signal["buyTime"]))
-                            incomplete = True
-                            break
-                        signal["BuyPrice"] = price
+                        price = signal["BuyPrice"]
                         if repository.save_signal(symbol, signal, index):
                             repository.commit()
                             saved += 1
@@ -3319,12 +3316,10 @@ class TradingAgent:
                             self.__log.d(
                                 f"RSI {symbol} BUY_SAVED buyTime={bought_at} BuyPrice={price} "
                                 f"signalClose={signal['close']} rsi={signal['rsi']} "
-                                f"previousRSI={signal['previousRSI']} entry=1m_open")
+                                f"previousRSI={signal['previousRSI']} entry=1m_open "
+                                f"recentLow={signal['recentLow']} recentLowTime={format_kst(signal['recentLowTime'])}")
                         else:
                             duplicates += 1
-                    if incomplete:
-                        # State was advanced in memory; never persist it for an unfinished batch.
-                        break
                     deleted = repository.finish_chunk(symbol, chunk_end, rsi_state)
                     cursor = chunk_end
                     progress = (cursor, rsi_state)
@@ -3335,7 +3330,7 @@ class TradingAgent:
                 else:
                     self.__log.d(f"RSI incomplete {symbol} index={index} saved={symbol_saved} "
                                  f"nextTime={format_kst(cursor / 1000)}")
-            self.__log.d("RSI complete; saved=", saved, " duplicates=", duplicates, " missing entry=", missing)
+            self.__log.d("RSI complete; saved=", saved, " duplicates=", duplicates)
             return saved
         finally:
             repository.release_simulation_lock()

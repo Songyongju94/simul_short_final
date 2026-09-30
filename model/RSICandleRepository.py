@@ -142,7 +142,7 @@ class RSICandleRepository:
             self.cursor.execute("SHOW COLUMNS FROM candleBuyResultList")
             self._result_columns = self.cursor.fetchall()
         required = {"symbol", "candleTime", "position", "BuyPrice",
-                    "buyTime", "triggerTime", "triggerPrice", "buyMode", "buyTimeKST"}
+                    "buyTime", "triggerTime", "triggerPrice", "buyMode", "buyTimeKST", "recentLow", "recentLowTime"}
         found = {column["Field"].lower() for column in self._result_columns}
         if not {name.lower() for name in required} <= found:
             raise RuntimeError("candleBuyResultList is missing required RSI result columns")
@@ -150,6 +150,11 @@ class RSICandleRepository:
         known.update(symbol=symbol, coinindex=coin_index,
                      buytimekst=datetime.fromtimestamp(signal["buyTime"], timezone(timedelta(hours=9)))
                      .strftime('%Y-%m-%d %H:%M:%S'))
+        low_time = known.get("recentlowtime")
+        if low_time in (None, 0, "0", ""):
+            known["recentlowtime"] = ""
+        elif not isinstance(low_time, str) or low_time.isdigit():
+            known["recentlowtime"] = datetime.fromtimestamp(float(low_time), timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S')
         names, values = [], []
         for column in self._result_columns:
             if "auto_increment" in column["Extra"].lower():
