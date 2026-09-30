@@ -1,5 +1,6 @@
 import time
 from kowanasutil import DBConnection, DBModel, ApiHandler, DBField, DBFieldUID, ApiResult, Log
+from model.SellResultSchema import EXTRA_COLUMNS, ensure_sell_columns, with_sell_columns
 
 class CandleSellResultRepository(DBModel, ApiHandler):
     def __init__(self, dbConnection, sellCondition, detailPercentForSell):
@@ -69,8 +70,26 @@ class CandleSellResultRepository(DBModel, ApiHandler):
                   DBField('h12HighPer', DBModel.Float, 32)]  # 63
 
         super().__init__(dbConnection, 'candleSellResultList', fields=fields, debug=False)
+        # DBModel emits TYPE(length), so append these fields after its CREATE.
+        # Named inserts also tolerate a schema upgrade interrupted between columns.
+        ensure_sell_columns(dbConnection)
+        for name, kind, default in EXTRA_COLUMNS:
+            field_type = DBModel.String if kind.startswith("VARCHAR") else (
+                DBModel.Long if kind == "BIGINT" else DBModel.Float)
+            length = int(kind[8:-1]) if kind.startswith("VARCHAR") else 32
+            fields.append(DBField(name, field_type, length))
+        self._sell_field_names = [field.key for field in fields]
         self.dbConnection = dbConnection
         self.__log = Log()
+
+    def add(self, data=None, columns=None):
+        if columns is not None:
+            return super().add(data, columns=columns)
+        # Legacy writers still pass 64 values. Preserve their indices and append
+        # empty metadata, using explicit column names rather than physical order.
+        values = with_sell_columns(data)
+        return super().add(values, columns=",".join(
+            "`" + name + "`" for name in self._sell_field_names))
 
     def _query(self, sql):
         try:

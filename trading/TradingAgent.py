@@ -3231,6 +3231,17 @@ class TradingAgent:
 
         return True
 
+    def runSellRSIOperation(self, target_symbol=None, end_time=None):
+        """TEST 19: 1m-low full remaining stop / 5m-open profit exits; no live orders."""
+        from model.RSISellRepository import RSISellRepository
+        from trading.RSISellSimulation import run
+        from trading.BinanceFuturesClient import BinanceFuturesClient
+        client = BinanceFuturesClient()
+        return run(RSISellRepository(self.__rsiDbConnection),
+                   client.get_candlestick_data, self.__log.d,
+                   float(self.__singleBalance), float(self.__tradingFee),
+                   target_symbol=target_symbol, end_time=end_time)
+
     # TEST 18: independent RSI / daily Bollinger buy simulation
     def runBuyRSIBuyOperation(self, target_symbol=None, wait_minutes=60, index_from=None, index_to=None, cooldown_hours=2):
         """TEST 18: resume daily batches, then prune only obsolete source candles."""

@@ -19,7 +19,7 @@ class SignalDetectorService(Service):
         self.__fundingEnable = int(self.__config.configs.get('FUNDING_ENABLE'))
         self.__secondAddBuyEnable = int(self.__config.configs.get('SECOND_ADD_BUY_ENABLE'))
         self.__sellTrailingStopEnable = int(self.__config.configs.get('SELL_TRAILING_STOP_ENABLE'))
-        self.__tradingAgent = TradingAgent(self.__app, database_only=self.__testNo == 18)
+        self.__tradingAgent = TradingAgent(self.__app, database_only=self.__testNo in (18, 19))
         self.previousIndex = 0
         self.previousSymbol = None
         self.__initTask()
@@ -28,7 +28,7 @@ class SignalDetectorService(Service):
 
     def __initTask(self):
         # RSI simulation does not initialize the trading center.
-        if self.__testNo != 18:
+        if self.__testNo not in (18, 19):
             self.__tradingAgent.fetchCurrency()
             try:
                 self.__tradingAgent.changeInitialSettings()
@@ -123,6 +123,8 @@ class SignalDetectorService(Service):
         elif self.__testNo == 18:
             self.__tradingAgent.runBuyRSIBuyOperation(
                 target_symbol=None, wait_minutes=60)
+        elif self.__testNo == 19:
+            self.__tradingAgent.runSellRSIOperation(target_symbol=None)
 
     def __setTasks(self):
             return
