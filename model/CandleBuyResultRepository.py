@@ -7,7 +7,7 @@ class CandleBuyResultRepository(DBModel, ApiHandler):
     def __init__(self, dbConnection, debuggingMode):
         if debuggingMode != 1:
             fields = [DBFieldUID(DBModel.Int, 36, DBField.AutoIncrement), # 0
-                      DBField('symbol', DBModel.String, 16),
+                      DBField('symbol', DBModel.String, 32),
                       DBField('candleTime', DBModel.Long, 32),
                       DBField('position', DBModel.String, 16),
                       DBField('high', DBModel.Float, 32),

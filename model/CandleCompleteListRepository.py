@@ -5,7 +5,7 @@ class CandleCompleteListRepository(DBModel, ApiHandler):
     def __init__(self, dbConnection):
         fields = [DBFieldUID(DBModel.Int, 36, DBField.AutoIncrement),
                   DBField('coinIndex', DBModel.Float, 32),
-                  DBField('symbol', DBModel.String, 16),
+                  DBField('symbol', DBModel.String, 32),
                   DBField('buyCompleteTime', DBModel.String, 64),
                   DBField('sellCompleteTime', DBModel.String, 64)]
         super().__init__(dbConnection, 'completeSymbolList', fields=fields, debug=False)

@@ -1,0 +1,7 @@
+.config
+.config.*
+!.config.example
+venv/
+.venv/
+__pycache__/
+/signaldetector.log

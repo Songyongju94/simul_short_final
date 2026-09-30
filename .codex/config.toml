@@ -1,0 +1,8 @@
+default_permissions = "protect-secrets"
+
+[permissions.protect-secrets]
+extends = ":workspace"
+
+[permissions.protect-secrets.filesystem.":workspace_roots"]
+".config" = "deny"
+".config.*" = "deny"

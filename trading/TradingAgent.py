@@ -276,7 +276,7 @@ def getBuyRateBySymbol(group, sym, defaultRate):
     return defaultRate
 
 class TradingAgent:
-    def __init__(self, context):
+    def __init__(self, context, database_only=False):
         self.__log = Log()
         self.__app = context
         self.__definition = Definition()
@@ -426,6 +426,7 @@ class TradingAgent:
         self.__tradingFee = float(self.__config.configs.get('TRADING_FEE'))
 
         dbConnection = self.__app.connectDB()
+        self.__rsiDbConnection = dbConnection
         self.__deviceRepository = DeviceRepository(dbConnection)
         self.__settingRepository = SettingRepository(dbConnection)
         self.__candleListRepository = CandleListRepository(dbConnection)
@@ -436,7 +437,7 @@ class TradingAgent:
         self.__candleHighestLowestListRepository = CandleHighestLowestListRepository(dbConnection)
 
         self.__candleCompleteListRepository = CandleCompleteListRepository(dbConnection)
-        self.__tradingCenter = TradingCenterFactory.create('binance')
+        self.__tradingCenter = None if database_only else TradingCenterFactory.create('binance')
         self.__currencies = None
         self.__candles = None
         self.__fetchCandleCount = 0
@@ -862,6 +863,8 @@ class TradingAgent:
 
         h24 = 0
         startTime = t365Time - 3600000
+        # Round up to a 5-minute boundary (epoch milliseconds).
+        startTime = ((startTime + 300000 - 1) // 300000) * 300000
         try:
             self.__candleListRepository.cleanCandle()
             self.__candleListRepository.commit()
@@ -880,6 +883,8 @@ class TradingAgent:
                 for currency in self.__currencies:
                     count += 1
                     symbolLog = currency.symbol
+                    # if currency.symbol != 'BTCUSDT':
+                    #     continue
                     try:
                         values = self.__tradingCenter.getCandlestickData(currency.symbol, minuites, limitNum, startTime)
                     except Exception as e:
@@ -983,6 +988,8 @@ class TradingAgent:
                 index += 1
             candles[currency.symbol] = []
             idx += 1
+
+
 
     # Test No 3
     def runBuyOperation(self):
@@ -3223,3 +3230,122 @@ class TradingAgent:
         data[52] = sellTime
 
         return True
+
+    # TEST 18: independent RSI / daily Bollinger buy simulation
+    def runBuyRSIBuyOperation(self, target_symbol="1000BONKUSDT", wait_minutes=60, index_from=None, index_to=None, cooldown_hours=2):
+        """TEST 18: resume daily batches, then prune only obsolete source candles."""
+        from datetime import datetime, timezone
+        from bisect import insort
+        from math import isfinite
+        from model.RSICandleRepository import RSICandleRepository
+        from trading.RSIBuyStrategy import DAY, MINUTE, QUARTER, evaluate, five_minute_bars, entry_price, validate_wait_minutes, cooldown_previous_buy, RSIHistoryCache
+        from trading.BinanceFuturesClient import BinanceFuturesClient
+
+        if self.__candleInterval != 5:
+            raise ValueError("TEST 18 requires CANDLE_INTERVAL=5")
+        validate_wait_minutes(wait_minutes, {})
+        if (isinstance(cooldown_hours, bool) or not isinstance(cooldown_hours, (int, float))
+                or not isfinite(cooldown_hours) or cooldown_hours < 0):
+            raise ValueError("cooldown_hours must be a finite non-negative number")
+        cooldown_seconds = cooldown_hours * 3600
+        repository = RSICandleRepository(self.__rsiDbConnection)
+        repository.acquire_simulation_lock()
+        try:
+            repository.prepare_progress()
+            client = None
+            as_of = int(time.time() * 1000)
+            saved = duplicates = missing = 0
+            source_windows = list(self.__rsiSourceWindows(repository, target_symbol, index_from, index_to))
+            for index, (symbol, start, end) in source_windows:
+                progress = repository.load_progress(symbol)
+                cursor, rsi_state = progress if progress is not None else (start, {})
+                validate_wait_minutes(wait_minutes, rsi_state)
+                if progress is not None:
+                    # Also finish any cleanup interrupted after the checkpoint commit.
+                    repository.prune_processed(symbol, cursor)
+                # Do not finish a batch whose entry minute is still open.
+                stop = min(end, as_of - MINUTE) // QUARTER * QUARTER
+                if cursor >= stop:
+                    continue
+                existing = repository.existing_buy_times(symbol)
+                buy_times = sorted(existing)
+                symbol_saved = 0
+                history_cache = RSIHistoryCache()
+                read_from = min(start, cursor) if progress is None else cursor // DAY * DAY - 20 * DAY
+                while cursor < stop:
+                    chunk_end = min((cursor // DAY + 1) * DAY, stop)
+                    bars = five_minute_bars(
+                        repository.read_five_minutes(symbol, read_from, chunk_end), as_of)
+                    prepared = history_cache.prepare(bars, cursor, chunk_end)
+                    read_from = chunk_end
+                    incomplete = False
+                    for signal in evaluate(
+                            bars, cursor, chunk_end, rsi_state=rsi_state, wait_minutes=wait_minutes,
+                            on_event=lambda message: self.__log.d(f"RSI {symbol} {message}"),
+                            prepared=prepared):
+                        if signal["buyTime"] in existing:
+                            duplicates += 1
+                            continue
+                        previous_buy = cooldown_previous_buy(buy_times, signal["buyTime"], cooldown_seconds)
+                        if previous_buy is not None:
+                            candidate_at = datetime.fromtimestamp(signal["buyTime"], timezone.utc).isoformat()
+                            allowed_at = datetime.fromtimestamp(previous_buy + cooldown_seconds, timezone.utc).isoformat()
+                            self.__log.d(f"RSI {symbol} BUY_COOLDOWN_SKIPPED buyTime={candidate_at} "
+                                         f"nextAllowedAt={allowed_at} cooldownHours={cooldown_hours}")
+                            continue
+                        if client is None:
+                            client = BinanceFuturesClient()
+                        price = entry_price(client.get_candlestick_data, symbol,
+                                            signal["buyTime"] * 1000, as_of)
+                        time.sleep(0.25)
+                        if price is None:
+                            missing += 1
+                            self.__log.d("RSI paused: entry minute unavailable; retry on restart",
+                                         symbol, signal["buyTime"])
+                            incomplete = True
+                            break
+                        signal["BuyPrice"] = price
+                        if repository.save_signal(symbol, signal, index):
+                            repository.commit()
+                            saved += 1
+                            symbol_saved += 1
+                            existing.add(signal["buyTime"])
+                            insort(buy_times, signal["buyTime"])
+                            bought_at = datetime.fromtimestamp(signal["buyTime"], timezone.utc).isoformat()
+                            self.__log.d(
+                                f"RSI {symbol} BUY_SAVED buyTime={bought_at} BuyPrice={price} "
+                                f"signalClose={signal['close']} rsi={signal['rsi']} "
+                                f"previousRSI={signal['previousRSI']} entry=1m_open")
+                        else:
+                            duplicates += 1
+                    if incomplete:
+                        # State was advanced in memory; never persist it for an unfinished batch.
+                        break
+                    deleted = repository.finish_chunk(symbol, chunk_end, rsi_state)
+                    cursor = chunk_end
+                    progress = (cursor, rsi_state)
+                    self.__log.d("RSI checkpoint", symbol, " nextTime=", cursor, " deleted=", deleted)
+                self.__log.d("RSI analyzed", symbol, " index=", index, " saved=", symbol_saved)
+            self.__log.d("RSI complete; saved=", saved, " duplicates=", duplicates, " missing entry=", missing)
+            return saved
+        finally:
+            repository.release_simulation_lock()
+
+
+    # Source selection for RSI simulation
+    def __rsiSourceWindows(self, repository, target_symbol=None, index_from=None, index_to=None):
+        index_from = self.__specificIndexFrom if index_from is None else index_from
+        index_to = self.__specificIndexTo if index_to is None else index_to
+        # Indices refer to DB symbols sorted alphabetically, starting at 1.
+        for index, window in enumerate(repository.source_windows(self.__candleInterval), 1):
+            # Explicit symbol selection takes precedence over index limits.
+            if target_symbol is not None:
+                if window[0] == target_symbol:
+                    yield index, window
+                continue
+            if index_from > 0 and index < index_from:
+                continue
+            if index_to > 0 and index > index_to:
+                continue
+            yield index, window
+

@@ -19,7 +19,7 @@ class SignalDetectorService(Service):
         self.__fundingEnable = int(self.__config.configs.get('FUNDING_ENABLE'))
         self.__secondAddBuyEnable = int(self.__config.configs.get('SECOND_ADD_BUY_ENABLE'))
         self.__sellTrailingStopEnable = int(self.__config.configs.get('SELL_TRAILING_STOP_ENABLE'))
-        self.__tradingAgent = TradingAgent(self.__app)
+        self.__tradingAgent = TradingAgent(self.__app, database_only=self.__testNo == 18)
         self.previousIndex = 0
         self.previousSymbol = None
         self.__initTask()
@@ -27,24 +27,26 @@ class SignalDetectorService(Service):
 
 
     def __initTask(self):
-        self.__tradingAgent.fetchCurrency()
-        try:
-            self.__tradingAgent.changeInitialSettings()
-        except Exception as e:
-            self.__log.d(str(e))
-        index = 0
-        # symbol = 'GALAUSDT'
-        symbol = None
-        symbolInfo = self.__tradingAgent.getStopSymbolInfoFromBuy()
-        if len(symbolInfo) == 1:
-            index = symbolInfo[0][0]
-            symbol = symbolInfo[0][1]
-            if index > self.previousIndex:
-                self.previousIndex = index
-                self.previousSymbol = symbol
-            else:
-                index = self.previousIndex
-                symbol = self.previousSymbol
+        # RSI simulation does not initialize the trading center.
+        if self.__testNo != 18:
+            self.__tradingAgent.fetchCurrency()
+            try:
+                self.__tradingAgent.changeInitialSettings()
+            except Exception as e:
+                self.__log.d(str(e))
+            index = 0
+            # symbol = 'GALAUSDT'
+            symbol = None
+            symbolInfo = self.__tradingAgent.getStopSymbolInfoFromBuy()
+            if len(symbolInfo) == 1:
+                index = symbolInfo[0][0]
+                symbol = symbolInfo[0][1]
+                if index > self.previousIndex:
+                    self.previousIndex = index
+                    self.previousSymbol = symbol
+                else:
+                    index = self.previousIndex
+                    symbol = self.previousSymbol
 
         if self.__testNo == 0:
             self.__tradingAgent.fetchCandle(self.__candleInterval)
@@ -118,10 +120,13 @@ class SignalDetectorService(Service):
         elif self.__testNo == 17:
             self.__tradingAgent.runBuyStaticSecondOperation()
             self.__tradingAgent.runSecondSellOperation()
+        elif self.__testNo == 18:
+            self.__tradingAgent.runBuyRSIBuyOperation(
+                target_symbol=None, wait_minutes=60)
 
     def __setTasks(self):
-        self._addTask(Task('fetchCurrencies', self.__fetchCurrency, {'app':self.__tradingAgent},
-            Scheduler(every=[timedelta(hours=24)], term=Scheduler.TERM_DAY, begin=KowanasTime.getKST())))
+            return
+
 
     def __fetchCurrency(self, args):
         args['app'].fetchCurrency()

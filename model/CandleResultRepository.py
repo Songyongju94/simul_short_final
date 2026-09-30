@@ -4,7 +4,7 @@ from kowanasutil import DBConnection, DBModel, ApiHandler, DBField, DBFieldUID, 
 class CandleResultRepository(DBModel, ApiHandler):
     def __init__(self, dbConnection):
         fields = [DBFieldUID(DBModel.Int, 36, DBField.AutoIncrement),
-                  DBField('symbol', DBModel.String, 16),
+                  DBField('symbol', DBModel.String, 32),
                   DBField('candleTime', DBModel.Long, 32),
                   DBField('high', DBModel.Float, 32),
                   DBField('low', DBModel.Float, 32),

@@ -1,6 +1,6 @@
 class Definition:
     def __init__(self):
-        self.isServer = True
+        self.isServer = False
 
     def getConfig1(self):
         if self.isServer:

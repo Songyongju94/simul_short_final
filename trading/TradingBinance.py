@@ -2,10 +2,7 @@ import time
 import numpy
 import traceback
 
-from binance_f import RequestClient
-from binance_f.model import *
-from binance_f.constant.test import *
-from binance_f.base.printobject import *
+from trading.BinanceFuturesClient import BinanceFuturesClient, OrderType
 from datetime import date, timedelta
 from kowanasutil import Log, Config
 
@@ -29,7 +26,9 @@ def updatePricePrecision(currSymbol, currPricePrecision):
     symbol = currSymbol.replace('USDT', '')
     pricePrecision = currPricePrecision
 
-    if symbol == 'YFI':
+    if symbol == 'GAIB' or symbol == 'OURA':
+        pricePrecision = -1
+    elif symbol == 'YFI':
         pricePrecision = 0
     elif symbol == 'BTC' or symbol == 'MKR' or symbol == 'DEFI' or symbol == 'BTCDOM':
         pricePrecision = 1
@@ -110,20 +109,20 @@ class TradingBinance(TradingCenter):
         self.__config = Config(file=self.__definition.getConfig1())
         self.__log = Log()
 
-        self.__request_client = RequestClient(
+        self.__request_client = BinanceFuturesClient(
             api_key=self.__config.configs.get('API_KEY'), secret_key=self.__config.configs.get('SECRET_KEY'))
         self.hedgeModeOn()
         self.upDownLimit = self.__config.configs.get('UP_DOWN_LIMIT')
 
     def __getInterval(self, min):
-        mins = {1: CandlestickInterval.MIN1,
-                3: CandlestickInterval.MIN3,
-                5: CandlestickInterval.MIN5,
-                15: CandlestickInterval.MIN15,
-                30: CandlestickInterval.MIN30,
-                60: CandlestickInterval.HOUR1,
-                240: CandlestickInterval.HOUR4,
-                1000: CandlestickInterval.WEEK1}
+        mins = {1: "1m",
+                3: "3m",
+                5: "5m",
+                15: "15m",
+                30: "30m",
+                60: "1h",
+                240: "4h",
+                1000: "1w"}
         return mins[min]
 
     def fetchCurrency(self):
@@ -153,6 +152,7 @@ class TradingBinance(TradingCenter):
                                                                 startTime=startTime, endTime=None, limit=limitCnt)
         except Exception as e:
             self.__log.d(e)
+            raise
         return values
 
     def hedgeModeOn(self):
@@ -162,6 +162,7 @@ class TradingBinance(TradingCenter):
             self.__log.d(e)
 
     def changePositionMode(self):
+        result = None
         try:
             result = self.__request_client.change_position_mode(dualSidePosition=True)
         except Exception as e:
@@ -181,9 +182,9 @@ class TradingBinance(TradingCenter):
         side = data[2]
 
         if side == 'BUY':
-            longShort = PositionSide.LONG
+            longShort = "LONG"
         else:
-            longShort = PositionSide.SHORT
+            longShort = "SHORT"
 
         if data[1].quantityPrecision == 0:
             quantity = int(data[4])
@@ -206,7 +207,7 @@ class TradingBinance(TradingCenter):
 
             try:
                 result = self.__request_client.post_order(
-                    symbol=data[1].symbol, side=side, ordertype=OrderType.LIMIT, timeInForce=TimeInForce.GTC,
+                    symbol=data[1].symbol, side=side, ordertype=OrderType.LIMIT, timeInForce="GTC",
                     price=str(price), quantity=str(quantity), positionSide=longShort)
                 self.__log.d('open order result = ', result)
             except Exception as e:
@@ -225,11 +226,11 @@ class TradingBinance(TradingCenter):
 
                 if orderType == OrderType.LIMIT:
                     result = self.__request_client.post_order(
-                        symbol=data[1].symbol, side=side, ordertype=orderType, timeInForce=TimeInForce.GTC,
+                        symbol=data[1].symbol, side=side, ordertype=orderType, timeInForce="GTC",
                         price=str(data[3]), quantity=str(quantity), closePosition=False, positionSide=longShort)
                 else:
                     result = self.__request_client.post_order(
-                        symbol=data[1].symbol, side=side, ordertype=orderType, timeInForce=TimeInForce.GTC,
+                        symbol=data[1].symbol, side=side, ordertype=orderType, timeInForce="GTC",
                         stopPrice=str(data[5]), price=str(data[3]), quantity=str(quantity), closePosition=False,
                         positionSide=longShort)
                     self.__log.d('close order result = ', result)
@@ -238,6 +239,7 @@ class TradingBinance(TradingCenter):
         return result
 
     def getRecentTradesList(self, symbol, count):
+        result = None
         self.__log.d('getRecentTradesList ', symbol)
         try:
             result = self.__request_client.get_recent_trades_list(symbol=symbol, limit=count)
@@ -268,7 +270,7 @@ class TradingBinance(TradingCenter):
 
     def changeMarginType(self, symbol):
         self.__log.d('changeMarginType ', symbol)
-        result = self.__request_client.change_margin_type(symbol=symbol, marginType=FuturesMarginType.CROSSED)
+        result = self.__request_client.change_margin_type(symbol=symbol, marginType="CROSSED")
         return result
 
     def getAccountTrades(self, symbol, limitCnt):
