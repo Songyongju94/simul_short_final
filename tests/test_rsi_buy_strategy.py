@@ -274,6 +274,23 @@ class StrategyTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): s.entry_price(fetch,"TEST",Q,Q+M)
 
 class RepositoryTests(unittest.TestCase):
+    def test_interrupt_with_closed_db_preserves_original_exception(self):
+        cursor = Mock()
+        connection = SimpleNamespace(cursor=cursor, db=SimpleNamespace(open=False))
+        repository = repo.RSICandleRepository(connection)
+        with self.assertRaises(KeyboardInterrupt):
+            try:
+                raise KeyboardInterrupt()
+            finally:
+                repository.release_simulation_lock()
+        cursor.execute.assert_not_called()
+
+    def test_open_db_releases_simulation_lock(self):
+        cursor = Mock()
+        connection = SimpleNamespace(cursor=cursor, db=SimpleNamespace(open=True))
+        repo.RSICandleRepository(connection).release_simulation_lock()
+        cursor.execute.assert_called_once_with("SELECT RELEASE_LOCK('rsi_bb_15m_resume_v1')")
+
     def test_reads_existing_ohlc_without_volume(self):
         cursor=Mock()
         r=repo.RSICandleRepository(SimpleNamespace(cursor=cursor))
@@ -285,6 +302,7 @@ class RepositoryTests(unittest.TestCase):
 
     def test_checkpoint_committed_before_scoped_deletion(self):
         cursor = Mock(rowcount=1)
+        cursor.fetchone.return_value = {"lastPruneWeek": None}
         connection = Mock(cursor=cursor)
         events = []
         cursor.execute.side_effect = lambda sql, params: events.append((sql, params))
@@ -293,10 +311,47 @@ class RepositoryTests(unittest.TestCase):
         r.finish_chunk("TEST", 30*D+Q, {"value": 25})
         self.assertIn("INSERT INTO rsi_buy_progress", events[0][0])
         self.assertEqual(events[1][0], "COMMIT")
-        self.assertIn("DELETE FROM candleList", events[2][0])
-        self.assertIn("WHERE symbol=%s AND candleTime < %s", events[2][0])
-        self.assertEqual(events[2][1], ("TEST", 10*D))
-        self.assertEqual(events[3][0], "COMMIT")
+        self.assertIn("DELETE FROM candleList", events[3][0])
+        self.assertIn("WHERE symbol=%s AND candleTime < %s", events[3][0])
+        self.assertEqual(events[3][1], ("TEST", 5*D))
+        self.assertEqual(events[4][0], "COMMIT")
+
+    def test_weekly_cleanup_skips_same_week_after_restart(self):
+        connection = Mock()
+        connection.cursor.fetchone.return_value = {"lastPruneWeek": 25*D}
+        r = repo.RSICandleRepository(connection)
+        self.assertEqual(r.prune_processed("TEST",31*D),0)
+        self.assertEqual(connection.cursor.execute.call_count,1)
+        connection.commit.assert_not_called()
+        connection.cursor.rowcount = 288*7
+        r.prune_processed("TEST",32*D)
+        deletes = [c for c in connection.cursor.execute.call_args_list if "DELETE" in c.args[0]]
+        self.assertEqual(deletes[0].args[1],("TEST",12*D))
+        self.assertEqual(connection.cursor.execute.call_args.args[1],(32*D,"TEST"))
+
+    def test_failed_cleanup_does_not_mark_week_complete(self):
+        connection = Mock()
+        connection.cursor.fetchone.return_value = {"lastPruneWeek": None}
+        connection.cursor.rowcount = 1
+        connection.commit.side_effect = RuntimeError("delete commit failed")
+        with self.assertRaises(RuntimeError):
+            repo.RSICandleRepository(connection).prune_processed("TEST",32*D)
+        self.assertFalse(any("UPDATE rsi_buy_progress" in c.args[0]
+                             for c in connection.cursor.execute.call_args_list))
+
+    def test_final_cleanup_requires_durable_completion_and_scopes_deletion(self):
+        connection = Mock()
+        r = repo.RSICandleRepository(connection)
+        r.load_progress = Mock(return_value=(D, {}))
+        with self.assertRaises(RuntimeError):
+            r.delete_completed_source("TEST", 2*D)
+        connection.cursor.execute.assert_not_called()
+        r.load_progress.return_value = (2*D, {})
+        connection.cursor.rowcount = 100
+        self.assertEqual(r.delete_completed_source("TEST",2*D),100)
+        self.assertEqual(connection.cursor.execute.call_args.args[1],("TEST",2*D))
+        self.assertIn("symbol=%s AND candleTime < %s",connection.cursor.execute.call_args.args[0])
+        connection.commit.assert_called_once()
 
     def test_checkpoint_commit_failure_never_deletes(self):
         connection = Mock()
@@ -313,7 +368,7 @@ class RepositoryTests(unittest.TestCase):
                 ("BuyPrice","double",""),("buyTime","bigint",""),
                 ("triggerTime","bigint",""),("triggerPrice","double",""),
                 ("buyMode","varchar(16)",""),("sellTime","bigint",""),
-                ("bolDataList","varchar(1000)","")]
+                ("bolDataList","varchar(1000)",""),("buyTimeKST","varchar(19)","")]
         cursor=Mock(rowcount=1)
         cursor.fetchall.return_value=[dict(Field=n,Type=t,Extra=e) for n,t,e in fields]
         r=repo.RSICandleRepository(SimpleNamespace(cursor=cursor))
@@ -323,6 +378,7 @@ class RepositoryTests(unittest.TestCase):
         sql,params=cursor.execute.call_args.args
         self.assertNotIn("TEST'COIN",sql)
         data=dict(zip([n for n,t,e in fields if not e],params[:-3]))
+        self.assertEqual(data["buyTimeKST"], "1970-01-21 14:15:00")
         self.assertEqual(data["sellTime"],0)
         self.assertEqual(data["bolDataList"],"")
 
@@ -341,6 +397,9 @@ class IntegrationTests(unittest.TestCase):
             def acquire_simulation_lock(self): pass
             def release_simulation_lock(self): pass
             def prepare_progress(self): pass
+            def delete_completed_source(self, symbol, end_time):
+                assert checkpoints[symbol][0] >= end_time
+                return 0
             def load_progress(self, symbol):
                 return json.loads(json.dumps(checkpoints.get(symbol)))
             def prune_processed(self, symbol, next_time):

@@ -16,6 +16,18 @@ class CandleListRepository(DBModel, ApiHandler):
         super().__init__(dbConnection, 'candleList', fields=fields, debug=False)
         self.dbConnection = dbConnection
         self.__log = Log()
+        self._ensure_candle_time_index()
+
+    def _ensure_candle_time_index(self):
+        cursor = self.dbConnection.cursor
+        cursor.execute(
+            "SHOW INDEX FROM candleList WHERE Key_name = %s",
+            ('idx_candlelist_symbol_time',))
+        if cursor.fetchone() is not None:
+            return
+        cursor.execute(
+            "CREATE INDEX idx_candlelist_symbol_time "
+            "ON candleList (symbol, candleTime)")
 
     def _query(self, sql):
         try:

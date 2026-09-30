@@ -3234,11 +3234,10 @@ class TradingAgent:
     # TEST 18: independent RSI / daily Bollinger buy simulation
     def runBuyRSIBuyOperation(self, target_symbol="1000BONKUSDT", wait_minutes=60, index_from=None, index_to=None, cooldown_hours=2):
         """TEST 18: resume daily batches, then prune only obsolete source candles."""
-        from datetime import datetime, timezone
         from bisect import insort
         from math import isfinite
         from model.RSICandleRepository import RSICandleRepository
-        from trading.RSIBuyStrategy import DAY, MINUTE, QUARTER, evaluate, five_minute_bars, entry_price, validate_wait_minutes, cooldown_previous_buy, RSIHistoryCache
+        from trading.RSIBuyStrategy import DAY, MINUTE, QUARTER, evaluate, five_minute_bars, entry_price, validate_wait_minutes, cooldown_previous_buy, RSIHistoryCache, format_kst
         from trading.BinanceFuturesClient import BinanceFuturesClient
 
         if self.__candleInterval != 5:
@@ -3266,6 +3265,11 @@ class TradingAgent:
                 # Do not finish a batch whose entry minute is still open.
                 stop = min(end, as_of - MINUTE) // QUARTER * QUARTER
                 if cursor >= stop:
+                    if cursor >= end:
+                        deleted = repository.delete_completed_source(symbol, end)
+                        self.__log.d(f"RSI completed {symbol} nextTime={format_kst(cursor / 1000)} deleted={deleted}")
+                    else:
+                        self.__log.d(f"RSI waiting {symbol} nextTime={format_kst(cursor / 1000)} reason=unprocessed_tail")
                     continue
                 existing = repository.existing_buy_times(symbol)
                 buy_times = sorted(existing)
@@ -3288,8 +3292,8 @@ class TradingAgent:
                             continue
                         previous_buy = cooldown_previous_buy(buy_times, signal["buyTime"], cooldown_seconds)
                         if previous_buy is not None:
-                            candidate_at = datetime.fromtimestamp(signal["buyTime"], timezone.utc).isoformat()
-                            allowed_at = datetime.fromtimestamp(previous_buy + cooldown_seconds, timezone.utc).isoformat()
+                            candidate_at = format_kst(signal["buyTime"])
+                            allowed_at = format_kst(previous_buy + cooldown_seconds)
                             self.__log.d(f"RSI {symbol} BUY_COOLDOWN_SKIPPED buyTime={candidate_at} "
                                          f"nextAllowedAt={allowed_at} cooldownHours={cooldown_hours}")
                             continue
@@ -3301,7 +3305,7 @@ class TradingAgent:
                         if price is None:
                             missing += 1
                             self.__log.d("RSI paused: entry minute unavailable; retry on restart",
-                                         symbol, signal["buyTime"])
+                                         symbol, format_kst(signal["buyTime"]))
                             incomplete = True
                             break
                         signal["BuyPrice"] = price
@@ -3311,7 +3315,7 @@ class TradingAgent:
                             symbol_saved += 1
                             existing.add(signal["buyTime"])
                             insort(buy_times, signal["buyTime"])
-                            bought_at = datetime.fromtimestamp(signal["buyTime"], timezone.utc).isoformat()
+                            bought_at = format_kst(signal["buyTime"])
                             self.__log.d(
                                 f"RSI {symbol} BUY_SAVED buyTime={bought_at} BuyPrice={price} "
                                 f"signalClose={signal['close']} rsi={signal['rsi']} "
@@ -3324,8 +3328,13 @@ class TradingAgent:
                     deleted = repository.finish_chunk(symbol, chunk_end, rsi_state)
                     cursor = chunk_end
                     progress = (cursor, rsi_state)
-                    self.__log.d("RSI checkpoint", symbol, " nextTime=", cursor, " deleted=", deleted)
-                self.__log.d("RSI analyzed", symbol, " index=", index, " saved=", symbol_saved)
+                    self.__log.d("RSI checkpoint ", symbol, " nextTime=", format_kst(cursor / 1000), " deleted=", deleted)
+                if cursor >= end:
+                    deleted = repository.delete_completed_source(symbol, end)
+                    self.__log.d(f"RSI completed {symbol} index={index} saved={symbol_saved} deleted={deleted}")
+                else:
+                    self.__log.d(f"RSI incomplete {symbol} index={index} saved={symbol_saved} "
+                                 f"nextTime={format_kst(cursor / 1000)}")
             self.__log.d("RSI complete; saved=", saved, " duplicates=", duplicates, " missing entry=", missing)
             return saved
         finally:

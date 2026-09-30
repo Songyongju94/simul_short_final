@@ -117,7 +117,7 @@ class CandleSellResultRepository(DBModel, ApiHandler):
                            ' FROM candleSellResultList order by buyTimeEpoch ASC')
         records = []
         columns = [DBField('uid', DBModel.Int, 36),
-                   DBField('symbol', DBModel.String, 16),
+                   DBField('symbol', DBModel.String, 32),
                    DBField('buyPrice', DBModel.Float, 32),
                    DBField('sellPrice', DBModel.Float, 32),
                    DBField('quantity', DBModel.Float, 32),

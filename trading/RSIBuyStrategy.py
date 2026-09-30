@@ -1,13 +1,17 @@
 """DB-fed RSI/BB buy signals. Times are UTC epoch milliseconds."""
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import isfinite
 from statistics import fmean, pstdev
 
 MINUTE = 60_000
 QUARTER = 15 * MINUTE
 DAY = 24 * 60 * MINUTE
+
+
+def format_kst(epoch_seconds):
+    return datetime.fromtimestamp(epoch_seconds, timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S KST')
 
 
 @dataclass(frozen=True)
@@ -177,7 +181,7 @@ def evaluate(bars, start, end, rsi_state=None, wait_minutes=60, on_event=None, p
         pending = strategy_state.get("pending")
         if pending is not None and decision_time > pending["expires_at"]:
             if on_event is not None:
-                expired = datetime.fromtimestamp(pending["expires_at"] / 1000, timezone.utc).isoformat()
+                expired = format_kst(pending["expires_at"] / 1000)
                 on_event(f"WAIT_EXPIRED expiresAt={expired} waitMinutes={wait_minutes} reason=no_bullish_RSI_rise; buy_cancelled")
             strategy_state.pop("pending", None)
             pending = None
@@ -206,8 +210,8 @@ def evaluate(bars, start, end, rsi_state=None, wait_minutes=60, on_event=None, p
                 armed_at=decision_time, expires_at=decision_time + wait_minutes * MINUTE,
                 lower=lower, upper=upper)
             if on_event is not None:
-                armed = datetime.fromtimestamp(decision_time / 1000, timezone.utc).isoformat()
-                expires = datetime.fromtimestamp((decision_time + wait_minutes * MINUTE) / 1000, timezone.utc).isoformat()
+                armed = format_kst(decision_time / 1000)
+                expires = format_kst((decision_time + wait_minutes * MINUTE) / 1000)
                 on_event(f"WAIT_STARTED armedAt={armed} close={bar.close} bolLow={lower} "
                          f"threshold={lower * .97} rsi={rsi[i]} expiresAt={expires} waitMinutes={wait_minutes}")
 

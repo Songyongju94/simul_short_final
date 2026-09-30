@@ -1,5 +1,6 @@
 import time
 import sys
+from datetime import datetime, timedelta, timezone
 
 from kowanasutil import DBConnection, DBModel, ApiHandler, DBField, DBFieldUID, ApiResult, Log
 
@@ -35,7 +36,7 @@ class CandleBuyResultRepository(DBModel, ApiHandler):
                       DBField('buyMode', DBModel.String, 16)]     # 26
         else:
             fields = [DBFieldUID(DBModel.Int, 36, DBField.AutoIncrement), # 0
-                      DBField('symbol', DBModel.String, 16),
+                      DBField('symbol', DBModel.String, 32),
                       DBField('candleTime', DBModel.Long, 32),
                       DBField('position', DBModel.String, 16),
                       DBField('high', DBModel.Float, 32),
@@ -64,9 +65,43 @@ class CandleBuyResultRepository(DBModel, ApiHandler):
                       DBField('addMBuyCount', DBModel.Int, 10),
                       DBField('buyMode', DBModel.String, 16)]  # 28
 
+        fields.append(DBField('buyTimeKST', DBModel.String, 19))
+        self._buy_field_count = len(fields)
         super().__init__(dbConnection, 'candleBuyResultList', fields=fields, debug=False)
         self.dbConnection = dbConnection
         self.__log = Log()
+        self._ensure_buy_time_kst()
+
+    def _ensure_buy_time_kst(self):
+        cursor = self.dbConnection.cursor
+        cursor.execute("SHOW COLUMNS FROM candleBuyResultList")
+        if not any(row["Field"].lower() == "buytimekst" for row in cursor.fetchall()):
+            cursor.execute("ALTER TABLE candleBuyResultList ADD COLUMN buyTimeKST VARCHAR(19) NOT NULL DEFAULT ''")
+        # Explicit epoch arithmetic avoids MySQL session timezone dependence.
+        cursor.execute("""
+            UPDATE candleBuyResultList
+            SET buyTimeKST = DATE_FORMAT(
+                DATE_ADD(DATE_ADD('1970-01-01 00:00:00', INTERVAL buyTime SECOND),
+                         INTERVAL 9 HOUR), '%Y-%m-%d %H:%i:%s')
+            WHERE (buyTimeKST IS NULL OR buyTimeKST = '') AND buyTime IS NOT NULL
+        """)
+        self.dbConnection.commit()
+
+    def _with_buy_time_kst(self, data):
+        values = list(data)
+        if len(values) not in (self._buy_field_count - 1, self._buy_field_count):
+            raise ValueError("Unexpected candleBuyResultList field count")
+        buy_time = values[14]
+        kst = (datetime.fromtimestamp(buy_time, timezone(timedelta(hours=9)))
+               .strftime('%Y-%m-%d %H:%M:%S')) if buy_time is not None else ''
+        if len(values) == self._buy_field_count - 1:
+            values.append(kst)
+        else:
+            values[-1] = kst
+        return values
+
+    def update(self, uid, data):
+        return super().update(uid, self._with_buy_time_kst(data))
 
     def _query(self, sql):
         try:
@@ -177,7 +212,7 @@ class CandleBuyResultRepository(DBModel, ApiHandler):
 
     def addCandleBuyResult(self, data):
         try:
-            result = self.add(data)
+            result = self.add(self._with_buy_time_kst(data))
             if not result:
                 self.__log.d('failed to add')
                 sys.exit(0)

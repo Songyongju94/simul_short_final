@@ -43,7 +43,7 @@ API 오류는 실행을 중단하며 앞서 커밋한 결과는 유지됩니다.
 - 첫 구간에서 필요한 이력을 읽은 뒤에는 신규 구간만 DB에서 조회합니다. 종목별 메모리 캐시에 최근 20일과 처리 중인 날짜의 검증된 5분봉·일봉을 보관하며, 새 데이터가 추가된 날짜만 일봉을 집계합니다. 15분봉도 이번 처리 구간만 집계합니다. 재시작 시 캐시는 남아 있는 DB 이력으로 다시 구성합니다.
 - 캐시는 실행 중 이미 읽은 원본이 변경되지 않는 것을 전제로 합니다. 일별 체크포인트, 원본 삭제, 매수 커밋, API 조회와 대기 시간은 기존과 동일합니다.
 - 저장 순서는 매수 결과 커밋 → 진행 위치·RSI 상태 커밋 → 원본 삭제입니다. 중간에 멈추면 마지막 완료 구간 이후부터 재개합니다. 미완료 하루 구간은 다시 검사하지만 이미 저장된 매수는 중복 생성하지 않습니다.
-- 삭제 범위는 해당 종목의 `candleTime < floor(nextTime / DAY) * DAY - 20 * DAY`입니다. 최근 20개 일봉과 진행 중인 날짜의 5분봉은 유지하고, 그 이전 데이터만 10,000행씩 삭제합니다. 다른 종목이나 매수 결과는 삭제하지 않습니다.
+- 삭제 범위는 해당 종목의 `candleTime < weekStartUTC(nextTime) - 20 * DAY`입니다. 최근 20개 일봉과 진행 중인 날짜의 5분봉은 유지하고, 그 이전 데이터만 10,000행씩 삭제합니다. 다른 종목이나 매수 결과는 삭제하지 않습니다.
 - 원본 정리 후에도 RSI를 처음부터 재계산하지 않고 누적 상태를 복원하므로 연속 실행과 같은 결과를 유지합니다. 처리 완료 종목은 새 데이터가 없으면 계산하지 않습니다.
 - 대기 시작·만료 시각과 설정한 대기 시간도 진행 상태에 저장됩니다. 저장된 대기 시간과 다른 설정으로 재개하면 오류로 중단합니다. 시간별 비교 실험은 백업 원본과 분리된 진행 기록·결과를 사용해야 합니다.
 - 이전 동시충족 방식의 진행 기록은 기존 위치부터 새 방식으로 이어가되, 대기 상태 없이 시작합니다. 과거 완료 구간과 매수 기록은 자동 재계산하지 않습니다.
@@ -65,3 +65,12 @@ FROM candleBuyResultList
 WHERE buyMode = 'RSI_BB_15M'
 ORDER BY buyTime, symbol;
 ```
+
+## Weekly candle cleanup
+Daily checkpoints and buy processing are unchanged. Cleanup runs once per symbol per simulated UTC week (Monday 00:00, KST Monday 09:00), using the checkpoint timestamp rather than the execution date. Only rows older than that week start minus 20 days are deleted. History retention can therefore reach nearly 27 days between cleanups.
+`rsi_buy_progress.lastPruneWeek` is added automatically on startup and is persisted only after all deletion batches commit. The first run after migration performs one catch-up cleanup; restarts within the same completed week skip deletion. Interrupted cleanup retries safely. `deleted=0` can now also mean that weekly cleanup was skipped.
+
+## Completed symbol cleanup
+When the durable checkpoint reaches the source end captured at startup, all remaining source rows for that symbol before that end are deleted in committed batches. Buy results and progress are retained. Newer rows added after the captured end are not deleted. Interrupted final cleanup is retried on restart. Progress-only symbols remain in the sorted source list to preserve index positions when source rows disappear.
+`RSI completed` means final cleanup succeeded. `RSI incomplete` or `RSI waiting` means the source still has an unprocessed tail or processing stopped before completion; weekly history cleanup remains in effect for those symbols. A partial 15-minute tail is preserved.
+After full source deletion, extending that symbol with new candles requires restoring the historical candles needed for the 20-day indicators from backup. Final cleanup is intended for a fixed historical simulation dataset.
