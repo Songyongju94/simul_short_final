@@ -3,7 +3,9 @@ import sys
 
 from kowanasutil import DBModel, ApiHandler, DBField, DBFieldUID, Log
 
-class CandleListRepository(DBModel, ApiHandler):
+from model.CandleIngestion import CandleIngestion
+
+class CandleListRepository(CandleIngestion, DBModel, ApiHandler):
     def __init__(self, dbConnection):
         fields = [DBFieldUID(DBModel.Int, 36, DBField.AutoIncrement),
                   DBField('symbol', DBModel.String, 32),
@@ -36,13 +38,6 @@ class CandleListRepository(DBModel, ApiHandler):
             print(str(e))
             return None
         return self.dbConnection.cursor.fetchall()
-
-    def backup(self):
-        try:
-            result = self._query('CREATE table candleList_org SELECT * FROM candleList')
-            self.__log.d('result=', result)
-        except Exception as e:
-            raise Exception(e)
 
     def readCandleList(self, symbol):
         rows = self._select(where='symbol' + '=\'' + symbol + '\' ORDER BY candleTime ASC')

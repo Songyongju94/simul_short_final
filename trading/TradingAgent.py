@@ -825,21 +825,8 @@ class TradingAgent:
 
     # Test No 1
     def fetchCandle(self, minuites):
-        now = KowanasTime.getKST()
-        dateTime = now.strftime('%Y-%m-%d %H:%M')
-        self.__log.d('*** FetchCandle start time = ', dateTime)
-        self.__fetchCandleCount = 0
-        symbolLog = None
-    
-        limitNum = 0
-        t3Time = (round(time.time()) - 10800) * 1000
-        t24Time = (round(time.time()) - 86400) * 1000
-        
-        if self.__specificEndTime == 0:
-          currTime = round(time.time()) * 1000
-        else:
-          currTime = self.__specificEndTime * 1000
-
+        from trading.CandleCollector import collect
+        currTime = (self.__specificEndTime or int(time.time())) * 1000
         if self.__dataPeriod == 0:  # specific Time
             t365Time = self.__specificTime * 1000  # from 2 days before to today.
         elif self.__dataPeriod == 1:
@@ -861,72 +848,18 @@ class TradingAgent:
             t365Time = (round(time.time()) - 92400) * 1000  # from 1 day before to today(1day + 20 * 60(for bol)).
             # t365Time = (round(time.time()) - 619200) * 1000    # from 10 days before to today.
 
-        h24 = 0
+        else:
+            raise ValueError("Unsupported DATA_PERIOD")
         startTime = t365Time - 3600000
-        # Round up to a 5-minute boundary (epoch milliseconds).
-        startTime = ((startTime + 300000 - 1) // 300000) * 300000
         try:
-            self.__candleListRepository.cleanCandle()
-            self.__candleListRepository.commit()
-            if minuites == 5:
-                limitNum = 1440
-            elif minuites == 15:
-                limitNum = 480
-            elif minuites == 240:
-                limitNum = 30
-            else:
-                limitNum = 120  # 5 days   60 mins
+            self.__fetchCandleCount = collect(
+                self.__candleListRepository,
+                [currency.symbol for currency in self.__currencies],
+                minuites, startTime, currTime, self.__log.d)
+        except Exception as exc:
+            self.__log.d(f"CANDLE FAILED: {exc}")
+            raise
 
-            while startTime <= currTime:
-                count = 0
-                candles = {}
-                for currency in self.__currencies:
-                    count += 1
-                    symbolLog = currency.symbol
-                    # if currency.symbol != 'BTCUSDT':
-                    #     continue
-                    try:
-                        values = self.__tradingCenter.getCandlestickData(currency.symbol, minuites, limitNum, startTime)
-                    except Exception as e:
-                        self.__log.d('zzz exception')
-                        self.__log.d(str(e))
-                        values = self.__tradingCenter.getCandlestickData(currency.symbol, minuites, limitNum, startTime)
-                    candles[currency.symbol] = []
-                    if count == 1:
-                        time_val = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(startTime / 1000))
-                        time_val2 = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(currTime / 1000))                   
-                        self.__log.d('Start Time = ', time_val, ' End Time = ', time_val2)
-                        
-                    if count % 20 == 0:
-                        time.sleep(4)
-                        self.__log.d('count = ', count)
-                    idx = 0
-                    for value in values:
-                        candle = CandleAdapter.createFromBinance(value, 0)
-                        if idx == 0:
-                            if startTime != candle.candleTime:
-                                self.__log.d(currency.symbol, ' wrong candle Time. Candle is not exist.. skip '
-                                                              'startTime=', startTime, ' first =', candle.candleTime)
-                                break
-                        data = [-1, currency.symbol, candle.candleTime, candle.last, candle.high, candle.low,
-                                candle.open, candle.close]
-                        try:
-                            self.__candleListRepository.addCandle(data)
-                        except Exception as e:
-                            self.__log.d('666 exception')
-                            self.__log.d(str(e))
-                        idx += 1
-                # per 5 days
-                startTime += (432000 * 1000)
-                self.__candleListRepository.commit()
-            now = KowanasTime.getKST()
-            dateTime = now.strftime('%Y-%m-%d %H:%M')
-            self.__log.d('*** success fetchCandle end time = ', dateTime)
-        except Exception as e:
-            self.__log.d(e)
-            self.__log.d(symbolLog, ' 888 exception')
-            sys.exit(0)
-            
     def __calcBollinger(self, symbol, values, value5Min):
         data = [value.close for value in values]
         if value5Min != 0:
@@ -1287,10 +1220,9 @@ class TradingAgent:
         return
 
     def backupCandleList(self):
-        self.__log.d('start backupCandleList()')
-        self.__candleListRepository.backup()
-        self.__candleListRepository.commit()
-        self.__log.d('finish backupCandleList()')
+        began = time.perf_counter()
+        changed = self.__candleListRepository.backup()
+        self.__log.d(f"CANDLE backup updated={changed} elapsedSeconds={time.perf_counter() - began:.3f}")
 
     def checkBtcdomRate(self, btcdomCandles, candleTime):
         if candleTime == 1640951100000:
