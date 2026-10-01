@@ -45,6 +45,19 @@ def batch(state, prices, closes=None):
 
 
 class ExitTests(unittest.TestCase):
+    def test_round_trip_fee_seven_dollars_per_ten_thousand(self):
+        state = s.initial_state(buy(), 10000, s.ROUND_TRIP_FEE_PERCENT)
+        events = batch(state, [(100, 95)])
+        self.assertAlmostEqual(events[0]["profit"], -507)
+        state = s.initial_state(buy(), 10000, s.ROUND_TRIP_FEE_PERCENT)
+        events = batch(state, [100]*5+[105, (100, 95)], history(110))
+        self.assertAlmostEqual(events[0]["profit"], 250-3.5)
+        self.assertAlmostEqual(events[1]["profit"], -250-3.5)
+        self.assertAlmostEqual(sum(e["profit"] for e in events), -7)
+        state = s.initial_state(buy(), 10000, s.ROUND_TRIP_FEE_PERCENT)
+        events = batch(state, [100]*5+[106])
+        self.assertAlmostEqual(sum(e["profit"] for e in events), 600-7)
+
     def test_stop_on_exact_touch_closes_all_at_fixed_price(self):
         state = s.initial_state(buy(), 1000, .1)
         self.assertEqual(state["stop_price"], 95)
@@ -124,6 +137,76 @@ class ExitTests(unittest.TestCase):
         self.assertEqual(split, whole)
 
 
+class CacheTests(unittest.TestCase):
+    def test_upper_is_computed_once_per_time_and_price(self):
+        cache = sim.CandleCache(Mock(side_effect=self.fetch), "TESTUSDT", 0)
+        with patch.object(sim, "provisional_upper", wraps=s.provisional_upper) as calculate:
+            first = cache.upper_at(BASE, 106)
+            self.assertEqual(cache.upper_at(BASE, 106), first)
+            self.assertEqual(calculate.call_count, 1)
+            cache.upper_at(BASE, 107)
+            self.assertEqual(calculate.call_count, 2)
+
+    def fetch(self, **kw):
+        step = M if kw["interval"] == "1m" else H
+        return [SimpleNamespace(openTime=t, open=100, low=99, close=100)
+                for t in range(kw["startTime"], kw["endTime"]+1, step)]
+
+    def test_overlap_fetches_only_missing_minutes(self):
+        fetch = Mock(side_effect=self.fetch)
+        cache = sim.CandleCache(fetch, "TESTUSDT", 0)
+        first = cache.ticks(BASE, BASE+500*M)
+        second = cache.ticks(BASE+100*M, BASE+600*M)
+        self.assertEqual(first[100:], second[:400])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(fetch.call_args.kwargs["limit"], 100)
+        cache.ticks(BASE+200*M, BASE+400*M)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_closed_hours_share_history_and_exclude_current_bucket(self):
+        fetch = Mock(side_effect=self.fetch)
+        cache = sim.CandleCache(fetch, "TESTUSDT", 0)
+        self.assertEqual(max(cache.closed_hours(BASE)), BASE-H)
+        cache.closed_hours(BASE+5*M)
+        self.assertEqual(fetch.call_count, 1)
+        cache.closed_hours(BASE+H)
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(fetch.call_args.kwargs["limit"], 1)
+
+    def test_bounded_cache_refetches_evicted_candles(self):
+        fetch = Mock(side_effect=self.fetch)
+        cache = sim.CandleCache(fetch, "TESTUSDT", 0, minute_capacity=500)
+        first = cache.ticks(BASE, BASE+500*M)
+        cache.ticks(BASE+500*M, BASE+1000*M)
+        self.assertEqual(len(cache.minutes), 500)
+        self.assertEqual(cache.ticks(BASE, BASE+500*M), first)
+        self.assertEqual(fetch.call_count, 3)
+
+    def test_failed_response_not_cached(self):
+        fetch = Mock(return_value=[])
+        cache = sim.CandleCache(fetch, "TESTUSDT", 0)
+        with self.assertRaises(s.SellDataUnavailable):
+            cache.ticks(BASE, BASE+M)
+        self.assertEqual(len(cache.minutes), 0)
+        fetch.side_effect = self.fetch
+        self.assertEqual(len(cache.ticks(BASE, BASE+M)), 1)
+
+    def test_lazy_and_eager_outputs_and_states_match(self):
+        for prices in ([100]*5+[106], [(100, 95)], [100]*5+[105, (100, 95)], [100]*30):
+            eager = s.initial_state(buy(), 1000, .1)
+            lazy = deepcopy(eager)
+            ticks = [(BASE+i*M, *(p if isinstance(p, tuple) else (p, p)))
+                     for i, p in enumerate(prices)]
+            closes = history(110)
+            expected = s.evaluate_batch(eager, ticks, closes, BASE+len(ticks)*M)
+            provider = Mock(return_value=closes)
+            actual = s.evaluate_batch(lazy, ticks, provider, BASE+len(ticks)*M)
+            self.assertEqual(actual, expected)
+            self.assertEqual(lazy, eager)
+            if not eager["took_half"]:
+                provider.assert_not_called()
+
+
 class MemoryRepository:
     def __init__(self):
         self.state, self.events, self.fail = None, {}, False
@@ -144,6 +227,74 @@ class MemoryRepository:
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_long_overlapping_positions_match_independent_runs_without_rereads(self):
+        records = [buy(), {**buy(), "uid": 43, "buyTime": buy()["buyTime"]+60}]
+        class Repo(MemoryRepository):
+            def __init__(self, records):
+                self.records, self.states, self.results = records, {}, {}
+            def buys(self, symbol): return self.records
+            def load(self, uid): return deepcopy(self.states.get(uid))
+            def save_event(self, buy, state, event):
+                self.results.setdefault(buy["uid"], []).append(deepcopy(event))
+                return True
+            def checkpoint(self, uid, state): self.states[uid] = deepcopy(state)
+        def fetch(**kw):
+            if kw["interval"] == "4h":
+                return [SimpleNamespace(openTime=t, close=100)
+                        for t in range(kw["startTime"], kw["endTime"]+1, H)]
+            return [SimpleNamespace(openTime=t, open=106 if t >= BASE+51010*M else 100, low=99)
+                    for t in range(kw["startTime"], kw["endTime"]+1, M)]
+        expected_results, expected_states = {}, {}
+        for record in records:
+            repo = Repo([record])
+            sim.run(repo, fetch, Mock(), 1000, .1,
+                    end_time=(BASE+51020*M)//1000, request_pause=0)
+            expected_results.update(repo.results)
+            expected_states.update(repo.states)
+        repo, counted = Repo(records), Mock(side_effect=fetch)
+        with patch.object(sim, "provisional_upper", wraps=s.provisional_upper) as calculate:
+            sim.run(repo, counted, Mock(), 1000, .1,
+                    end_time=(BASE+51020*M)//1000, request_pause=0)
+            self.assertEqual(calculate.call_count, 1)
+        self.assertEqual(repo.results, expected_results)
+        self.assertEqual(repo.states, expected_states)
+        ranges = [(c.kwargs["startTime"], c.kwargs["endTime"])
+                  for c in counted.call_args_list if c.kwargs["interval"] == "1m"]
+        self.assertTrue(all(a[1] < b[0] for a, b in zip(ranges, ranges[1:])))
+
+    def test_shared_symbol_cache_reduces_calls_and_matches_independent_runs(self):
+        buys = [buy(), {**buy(), "uid": 43, "buyTime": buy()["buyTime"]+60}]
+        class Repo(MemoryRepository):
+            def __init__(self, records):
+                self.records, self.states, self.results = records, {}, {}
+            def buys(self, symbol): return self.records
+            def load(self, uid): return self.states.get(uid)
+            def save_event(self, buy, state, event):
+                self.results.setdefault(buy["uid"], []).append(deepcopy(event))
+                return True
+            def checkpoint(self, uid, state): self.states[uid] = deepcopy(state)
+        expected = {}
+        independent_calls = 0
+        for record in buys:
+            repo, fetch = Repo([record]), Mock(side_effect=self.fetch)
+            sim.run(repo, fetch, Mock(), 1000, 0, end_time=(BASE+6*M)//1000, request_pause=0)
+            expected.update(repo.results)
+            independent_calls += fetch.call_count
+        repo, fetch = Repo(buys), Mock(side_effect=self.fetch)
+        sim.run(repo, fetch, Mock(), 1000, 0, end_time=(BASE+6*M)//1000, request_pause=0)
+        self.assertEqual(repo.results, expected)
+        self.assertEqual(independent_calls, 4)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_stop_requires_no_four_hour_request(self):
+        def fetch(**kw):
+            self.assertEqual(kw["interval"], "1m")
+            return [SimpleNamespace(openTime=t, open=100, low=95)
+                    for t in range(kw["startTime"], kw["endTime"]+1, M)]
+        repo = MemoryRepository()
+        sim.run(repo, fetch, Mock(), 1000, 0, end_time=(BASE+M)//1000, request_pause=0)
+        self.assertEqual(repo.events["STOP"]["fraction"], 1)
+
     def test_old_checkpoint_rejected_before_fetch(self):
         repo = MemoryRepository()
         repo.state = s.initial_state(buy(), 1000, 0)

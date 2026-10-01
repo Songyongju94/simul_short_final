@@ -3235,11 +3235,12 @@ class TradingAgent:
         """TEST 19: 1m-low full remaining stop / 5m-open profit exits; no live orders."""
         from model.RSISellRepository import RSISellRepository
         from trading.RSISellSimulation import run
+        from trading.RSISellStrategy import ROUND_TRIP_FEE_PERCENT
         from trading.BinanceFuturesClient import BinanceFuturesClient
         client = BinanceFuturesClient()
         return run(RSISellRepository(self.__rsiDbConnection),
                    client.get_candlestick_data, self.__log.d,
-                   float(self.__singleBalance), float(self.__tradingFee),
+                   float(self.__singleBalance), ROUND_TRIP_FEE_PERCENT,
                    target_symbol=target_symbol, end_time=end_time)
 
     # TEST 18: independent RSI / daily Bollinger buy simulation
