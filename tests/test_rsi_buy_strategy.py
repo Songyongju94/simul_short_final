@@ -565,4 +565,59 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(agent.runBuyRSIBuyOperation(target_symbol="TEST"),0)
             self.assertEqual(len(saved),1)
 
+
+class BadSymbolTests(unittest.TestCase):
+    def test_bad_symbol_continues_but_other_errors_propagate(self):
+        from binance_common.errors import BadRequestError
+        tree = ast.parse((ROOT / "trading/TradingAgent.py").read_text(encoding="utf-8"))
+        cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "TradingAgent")
+        cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef)
+                    and n.name in ("runBuyRSIBuyOperation", "__rsiSourceWindows")]
+        for error in (BadRequestError("Invalid symbol.", -1121),
+                      BadRequestError("Invalid interval.", -1120),
+                      RuntimeError("network failed")):
+            with self.subTest(error=error):
+                repository = Mock()
+                repository.source_windows.return_value = [("BAD", 0, Q), ("GOOD", 0, Q)]
+                repository.load_progress.return_value = None
+                repository.existing_buy_times.return_value = set()
+                repository.read_five_minutes.return_value = []
+                fetch = Mock(side_effect=[error, []])
+                log = Mock()
+                env = {"time": SimpleNamespace(time=lambda: (Q + M) / 1000, sleep=lambda _: None)}
+                exec(compile(ast.Module(body=[cls], type_ignores=[]), "isolated", "exec"), env)
+                agent = env["TradingAgent"]()
+                for key, value in dict(rsiDbConnection=None, candleInterval=5,
+                                       specificIndexFrom=0, specificIndexTo=0, log=log).items():
+                    setattr(agent, "_TradingAgent__" + key, value)
+
+                def evaluate(*args, minute_opens, **kwargs):
+                    minute_opens(0, 0)
+                    return iter(())
+
+                modules = {
+                    "model": SimpleNamespace(), "trading": SimpleNamespace(),
+                    "model.RSICandleRepository": SimpleNamespace(RSICandleRepository=lambda _: repository),
+                    "trading.RSIBuyStrategy": s,
+                    "trading.BinanceFuturesClient": SimpleNamespace(
+                        BinanceFuturesClient=lambda: SimpleNamespace(get_candlestick_data=fetch)),
+                }
+                with patch.dict(sys.modules, modules), patch.object(s, "evaluate_intraminute", evaluate):
+                    if isinstance(error, BadRequestError) and error.status_code == -1121:
+                        self.assertEqual(agent.runBuyRSIBuyOperation(), 0)
+                        self.assertEqual([c.kwargs["symbol"] for c in fetch.call_args_list], ["BAD", "GOOD"])
+                        self.assertEqual(repository.finish_chunk.call_count, 1)
+                        self.assertEqual(repository.finish_chunk.call_args.args[0], "GOOD")
+                        repository.delete_completed_source.assert_called_once_with("GOOD", Q)
+                        self.assertTrue(any("BAD_SYMBOL" in str(c) and "BAD" in str(c)
+                                            for c in log.d.call_args_list))
+                    else:
+                        with self.assertRaises(type(error)) as caught:
+                            agent.runBuyRSIBuyOperation()
+                        self.assertIs(caught.exception, error)
+                        self.assertEqual(fetch.call_count, 1)
+                        repository.finish_chunk.assert_not_called()
+                        repository.delete_completed_source.assert_not_called()
+                repository.release_simulation_lock.assert_called_once()
+
 if __name__=="__main__": unittest.main()

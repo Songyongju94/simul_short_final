@@ -3247,6 +3247,7 @@ class TradingAgent:
     def runBuyRSIBuyOperation(self, target_symbol=None, wait_minutes=60, index_from=None, index_to=None, cooldown_hours=2):
         """TEST 18: resume daily batches, then prune only obsolete source candles."""
         from bisect import insort
+        from binance_common.errors import BadRequestError
         from math import isfinite
         from model.RSICandleRepository import RSICandleRepository
         from trading.RSIBuyStrategy import DAY, MINUTE, QUARTER, evaluate_intraminute, minute_open_prices, validate_intraminute_state, five_minute_bars, validate_wait_minutes, cooldown_previous_buy, RSIHistoryCache, format_kst
@@ -3297,45 +3298,53 @@ class TradingAgent:
                 symbol_saved = 0
                 history_cache = RSIHistoryCache()
                 read_from = min(start, cursor) if progress is None else cursor // DAY * DAY - 20 * DAY
-                while cursor < stop:
-                    chunk_end = min((cursor // DAY + 1) * DAY, stop)
-                    bars = five_minute_bars(
-                        repository.read_five_minutes(symbol, read_from, chunk_end), as_of)
-                    prepared = history_cache.prepare(bars, cursor, chunk_end)
-                    read_from = chunk_end
-                    for signal in evaluate_intraminute(
-                            bars, cursor, chunk_end, minute_opens=fetch_minute_opens, rsi_state=rsi_state, wait_minutes=wait_minutes,
-                            on_event=lambda message: self.__log.d(f"RSI {symbol} {message}"),
-                            prepared=prepared):
-                        if signal["buyTime"] in existing:
-                            duplicates += 1
-                            continue
-                        previous_buy = cooldown_previous_buy(buy_times, signal["buyTime"], cooldown_seconds)
-                        if previous_buy is not None:
-                            candidate_at = format_kst(signal["buyTime"])
-                            allowed_at = format_kst(previous_buy + cooldown_seconds)
-                            self.__log.d(f"RSI {symbol} BUY_COOLDOWN_SKIPPED buyTime={candidate_at} "
-                                         f"nextAllowedAt={allowed_at} cooldownHours={cooldown_hours}")
-                            continue
-                        price = signal["BuyPrice"]
-                        if repository.save_signal(symbol, signal, index):
-                            repository.commit()
-                            saved += 1
-                            symbol_saved += 1
-                            existing.add(signal["buyTime"])
-                            insort(buy_times, signal["buyTime"])
-                            bought_at = format_kst(signal["buyTime"])
-                            self.__log.d(
-                                f"RSI {symbol} BUY_SAVED buyTime={bought_at} BuyPrice={price} "
-                                f"signalClose={signal['close']} rsi={signal['rsi']} "
-                                f"previousRSI={signal['previousRSI']} entry=1m_open "
-                                f"recentLow={signal['recentLow']} recentLowTime={format_kst(signal['recentLowTime'])}")
-                        else:
-                            duplicates += 1
-                    deleted = repository.finish_chunk(symbol, chunk_end, rsi_state)
-                    cursor = chunk_end
-                    progress = (cursor, rsi_state)
-                    self.__log.d("RSI checkpoint ", symbol, " nextTime=", format_kst(cursor / 1000), " deleted=", deleted)
+                try:
+                    while cursor < stop:
+                        chunk_end = min((cursor // DAY + 1) * DAY, stop)
+                        bars = five_minute_bars(
+                            repository.read_five_minutes(symbol, read_from, chunk_end), as_of)
+                        prepared = history_cache.prepare(bars, cursor, chunk_end)
+                        read_from = chunk_end
+                        for signal in evaluate_intraminute(
+                                bars, cursor, chunk_end, minute_opens=fetch_minute_opens, rsi_state=rsi_state, wait_minutes=wait_minutes,
+                                on_event=lambda message: self.__log.d(f"RSI {symbol} {message}"),
+                                prepared=prepared):
+                            if signal["buyTime"] in existing:
+                                duplicates += 1
+                                continue
+                            previous_buy = cooldown_previous_buy(buy_times, signal["buyTime"], cooldown_seconds)
+                            if previous_buy is not None:
+                                candidate_at = format_kst(signal["buyTime"])
+                                allowed_at = format_kst(previous_buy + cooldown_seconds)
+                                self.__log.d(f"RSI {symbol} BUY_COOLDOWN_SKIPPED buyTime={candidate_at} "
+                                             f"nextAllowedAt={allowed_at} cooldownHours={cooldown_hours}")
+                                continue
+                            price = signal["BuyPrice"]
+                            if repository.save_signal(symbol, signal, index):
+                                repository.commit()
+                                saved += 1
+                                symbol_saved += 1
+                                existing.add(signal["buyTime"])
+                                insort(buy_times, signal["buyTime"])
+                                bought_at = format_kst(signal["buyTime"])
+                                self.__log.d(
+                                    f"RSI {symbol} BUY_SAVED buyTime={bought_at} BuyPrice={price} "
+                                    f"signalClose={signal['close']} rsi={signal['rsi']} "
+                                    f"previousRSI={signal['previousRSI']} entry=1m_open "
+                                    f"recentLow={signal['recentLow']} recentLowTime={format_kst(signal['recentLowTime'])}")
+                            else:
+                                duplicates += 1
+                        deleted = repository.finish_chunk(symbol, chunk_end, rsi_state)
+                        cursor = chunk_end
+                        progress = (cursor, rsi_state)
+                        self.__log.d("RSI checkpoint ", symbol, " nextTime=", format_kst(cursor / 1000), " deleted=", deleted)
+                except BadRequestError as exc:
+                    if exc.status_code != -1121:
+                        raise
+                    # Leave the failed chunk uncheckpointed so its source is retained.
+                    self.__log.d(f"RSI {symbol!r} SKIPPED reason=BAD_SYMBOL code=-1121 "
+                                 f"index={index} nextTime={format_kst(cursor / 1000)}")
+                    continue
                 if cursor >= end:
                     deleted = repository.delete_completed_source(symbol, end)
                     self.__log.d(f"RSI completed {symbol} index={index} saved={symbol_saved} deleted={deleted}")
