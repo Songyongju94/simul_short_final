@@ -4,7 +4,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -57,6 +57,52 @@ TradingBinance = trading_class()
 
 
 class MigrationTests(unittest.TestCase):
+    def test_candle_timeout_retries_then_succeeds_with_identical_request(self):
+        api = Mock()
+        api.kline_candlestick_data.side_effect = [
+            adapter.ClientError('Timeout waiting for response from backend server.'),
+            adapter.Timeout('read timed out'),
+            adapter.ClientError('backend timeout', -1007),
+            SimpleNamespace(data=lambda: [])]
+        with patch.object(adapter.time, 'sleep') as sleep, patch.object(adapter, 'logger') as log:
+            self.assertEqual(Client(rest_api=api).get_candlestick_data('TEST', '1m', 0, 59999, 1), [])
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [1, 2, 4])
+        self.assertEqual(log.warning.call_count, 3)
+        calls = api.kline_candlestick_data.call_args_list
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(c == calls[0] for c in calls))
+
+    def test_candle_timeout_exhaustion_preserves_exception(self):
+        api = Mock()
+        error = adapter.ClientError('Timeout waiting for response from backend server.')
+        api.kline_candlestick_data.side_effect = error
+        with patch.object(adapter.time, 'sleep') as sleep, patch.object(adapter, 'logger') as log:
+            with self.assertRaises(adapter.ClientError) as caught:
+                Client(rest_api=api).get_candlestick_data('TEST', '1m')
+        self.assertIs(caught.exception, error)
+        self.assertEqual(api.kline_candlestick_data.call_count, 4)
+        self.assertEqual(sleep.call_count, 3)
+        log.error.assert_called_once()
+
+    def test_non_timeout_and_order_errors_are_not_retried(self):
+        from binance_common.errors import BadRequestError
+        for error in (BadRequestError('Invalid symbol.', -1121),
+                      adapter.ClientError('Invalid request'), ValueError('bad response')):
+            api = Mock()
+            api.kline_candlestick_data.side_effect = error
+            with patch.object(adapter.time, 'sleep') as sleep:
+                with self.assertRaises(type(error)):
+                    Client(rest_api=api).get_candlestick_data('TEST', '1m')
+                sleep.assert_not_called()
+            self.assertEqual(api.kline_candlestick_data.call_count, 1)
+        api = Mock()
+        api.new_order.side_effect = adapter.ClientError('Timeout waiting for response from backend server.')
+        with patch.object(adapter.time, 'sleep') as sleep:
+            with self.assertRaises(adapter.ClientError):
+                Client(rest_api=api)._call('new_order', symbol='TEST')
+            sleep.assert_not_called()
+        api.new_order.assert_called_once()
+
     def setUp(self):
         self.api = FakeApi()
         self.client = Client(rest_api=self.api)

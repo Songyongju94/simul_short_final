@@ -7,6 +7,25 @@ collide with ordinary Binance orderIds. The positive algoId is also retained.
 from decimal import Decimal
 from types import SimpleNamespace
 from uuid import uuid4
+import logging
+import time
+
+from binance_common.errors import ClientError
+from requests.exceptions import Timeout
+
+
+logger = logging.getLogger(__name__)
+
+
+def _is_candle_timeout(exc):
+    if isinstance(exc, (Timeout, TimeoutError)):
+        return True
+    if not isinstance(exc, ClientError):
+        return False
+    code = getattr(exc, "status_code", None)
+    message = str(getattr(exc, "error_message", "")).lower()
+    return code == -1007 or (code is None and (
+        "timeout" in message or "timed out" in message))
 
 
 class OrderType:
@@ -124,8 +143,21 @@ class BinanceFuturesClient:
         return _record(self._call("exchange_information"))
 
     def get_candlestick_data(self, symbol, interval, startTime=None, endTime=None, limit=None):
-        rows = self._call("kline_candlestick_data", symbol=symbol, interval=interval,
-                          start_time=startTime, end_time=endTime, limit=limit)
+        for attempt in range(4):
+            try:
+                rows = self._call("kline_candlestick_data", symbol=symbol, interval=interval,
+                                  start_time=startTime, end_time=endTime, limit=limit)
+                break
+            except (ClientError, Timeout, TimeoutError) as exc:
+                if not _is_candle_timeout(exc):
+                    raise
+                if attempt == 3:
+                    logger.error("CANDLE timeout exhausted symbol=%s interval=%s attempts=4", symbol, interval)
+                    raise
+                delay = 2 ** attempt
+                logger.warning("CANDLE timeout retry=%s/3 symbol=%s interval=%s delaySeconds=%s",
+                               attempt + 1, symbol, interval, delay)
+                time.sleep(delay)
         names = ("openTime", "open", "high", "low", "close", "volume", "closeTime",
                  "quoteAssetVolume", "numTrades", "takerBuyBaseAssetVolume",
                  "takerBuyQuoteAssetVolume", "ignore")

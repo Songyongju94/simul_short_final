@@ -363,8 +363,8 @@ class IntegrationTests(unittest.TestCase):
     def test_service_19_routes_to_sell_without_trading_initialization(self):
         tree = ast.parse((ROOT/"SignalDetectorService.py").read_text(encoding="utf-8-sig"))
         text = ast.unparse(tree)
-        self.assertIn("database_only=self.__testNo in (18, 19)", text)
-        self.assertIn("if self.__testNo not in (18, 19):", text)
+        self.assertIn("database_only=self.__testNo in (18, 19, 20)", text)
+        self.assertIn("if self.__testNo not in (18, 19, 20):", text)
         self.assertIn("elif self.__testNo == 19:", text)
         self.assertIn("runSellRSIOperation(target_symbol=None)", text)
 
