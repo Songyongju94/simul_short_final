@@ -45,17 +45,21 @@ def batch(state, prices, closes=None):
 
 
 class ExitTests(unittest.TestCase):
-    def test_round_trip_fee_seven_dollars_per_ten_thousand(self):
+    def test_stop_and_profit_exit_fees_on_sold_notional(self):
         state = s.initial_state(buy(), 10000, s.ROUND_TRIP_FEE_PERCENT)
         events = batch(state, [(100, 95)])
-        self.assertAlmostEqual(events[0]["profit"], -507)
+        self.assertAlmostEqual(events[0]["profit"], -510)
         state = s.initial_state(buy(), 10000, s.ROUND_TRIP_FEE_PERCENT)
         events = batch(state, [100]*5+[105, (100, 95)], history(110))
         self.assertAlmostEqual(events[0]["profit"], 250-3.5)
-        self.assertAlmostEqual(events[1]["profit"], -250-3.5)
-        self.assertAlmostEqual(sum(e["profit"] for e in events), -7)
+        self.assertAlmostEqual(events[1]["profit"], -250-5)
+        self.assertAlmostEqual(sum(e["profit"] for e in events), -8.5)
+        self.assertAlmostEqual(state["realized"], -8.5)
         state = s.initial_state(buy(), 10000, s.ROUND_TRIP_FEE_PERCENT)
         events = batch(state, [100]*5+[106])
+        self.assertEqual([e["stage"] for e in events], ["TP5", "BB4H"])
+        for event in events:
+            self.assertAlmostEqual(event["profit"], 300-3.5)
         self.assertAlmostEqual(sum(e["profit"] for e in events), 600-7)
 
     def test_stop_on_exact_touch_closes_all_at_fixed_price(self):

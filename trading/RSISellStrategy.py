@@ -4,7 +4,8 @@ from statistics import fmean, pstdev
 
 MINUTE = 60_000
 FOUR_HOURS = 240 * MINUTE
-ROUND_TRIP_FEE_PERCENT = 0.07  # Combined buy/sell fee, on original buy notional.
+ROUND_TRIP_FEE_PERCENT = 0.07  # Profit exit: combined buy/sell fee on sold buy notional.
+STOP_FEE_PERCENT = 0.1  # Stop exit: combined buy/sell fee on sold buy notional.
 
 
 class SellDataUnavailable(ValueError):
@@ -48,7 +49,8 @@ def evaluate_batch(state, ticks, four_hour_closes, end, upper_at=None):
     def sell(t, price, fraction, stage, upper=0):
         quantity = state["balance"] / state["buy_price"] * fraction
         percent = (price / state["buy_price"] - 1) * 100
-        profit = state["balance"] * fraction * (percent - state["fee_percent"]) / 100
+        fee_percent = STOP_FEE_PERCENT if stage == "STOP" else state["fee_percent"]
+        profit = state["balance"] * fraction * (percent - fee_percent) / 100
         state["remaining"] -= fraction
         state["realized"] += profit
         events.append(dict(time=t // 1000, price=price, fraction=fraction,
